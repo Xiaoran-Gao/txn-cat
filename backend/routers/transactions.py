@@ -1,0 +1,259 @@
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from database import db_connection
+from models import (
+    TransactionCreate, TransactionUpdate, TransactionOut,
+    BulkUpdate, BulkDelete, ImportResult, CategorizeResult,
+)
+from services.parser import parse_excel
+from services.normalizer import normalize_description
+
+router = APIRouter()
+
+
+@router.post("/import", response_model=ImportResult)
+def import_transactions(file: UploadFile = File(...)):
+    if not (file.filename.lower().endswith((".xlsx", ".xls", ".csv"))):
+        raise HTTPException(400, "Unsupported file format. Use .xlsx, .xls, or .csv")
+
+    try:
+        transactions = parse_excel(file.file, file.filename)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to parse file: {str(e)}")
+
+    imported = 0
+    skipped = 0
+    errors = []
+
+    with db_connection() as conn:
+        for txn in transactions:
+            try:
+                cleaned = normalize_description(txn["description"])
+                existing = conn.execute(
+                    """SELECT id FROM transactions
+                       WHERE date = ? AND raw_description = ? AND amount = ?""",
+                    (txn["date"], txn["description"], txn["amount"]),
+                ).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
+
+                conn.execute(
+                    """INSERT INTO transactions (date, raw_description, cleaned_description, amount)
+                       VALUES (?, ?, ?, ?)""",
+                    (txn["date"], txn["description"], cleaned, txn["amount"]),
+                )
+                imported += 1
+            except Exception as e:
+                errors.append(f"Row error: {str(e)}")
+
+    return {"imported": imported, "skipped": skipped, "errors": errors}
+
+
+@router.post("")
+def create_transaction(txn: TransactionCreate):
+    cleaned = normalize_description(txn.description)
+    with db_connection() as conn:
+        cur = conn.execute(
+            """INSERT INTO transactions (date, raw_description, cleaned_description, amount, currency, source)
+               VALUES (?, ?, ?, ?, ?, 'manual')""",
+            (txn.date.isoformat(), txn.description, cleaned, txn.amount, txn.currency),
+        )
+        return {"id": cur.lastrowid, "cleaned_description": cleaned}
+
+
+@router.get("")
+def list_transactions(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category_id: int | None = None,
+    subcategory_id: int | None = None,
+    search: str | None = None,
+    is_categorized: bool | None = None,
+    sort_by: str = "date",
+    sort_order: str = "desc",
+):
+    valid_sorts = {"date", "amount", "created_at"}
+    if sort_by not in valid_sorts:
+        sort_by = "date"
+    if sort_order not in ("asc", "desc"):
+        sort_order = "desc"
+
+    conditions = []
+    params = []
+
+    if start_date:
+        conditions.append("t.date >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("t.date <= ?")
+        params.append(end_date)
+    if category_id:
+        conditions.append("t.category_id = ?")
+        params.append(category_id)
+    if subcategory_id:
+        conditions.append("t.subcategory_id = ?")
+        params.append(subcategory_id)
+    if search:
+        conditions.append("(t.raw_description LIKE ? OR t.cleaned_description LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    if is_categorized is not None:
+        conditions.append("t.is_categorized = ?")
+        params.append(1 if is_categorized else 0)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    with db_connection() as conn:
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM transactions t {where}", params
+        ).fetchone()[0]
+
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            f"""SELECT t.*, c1.name as category_name, c2.name as subcategory_name
+                FROM transactions t
+                LEFT JOIN categories c1 ON t.category_id = c1.id
+                LEFT JOIN categories c2 ON t.subcategory_id = c2.id
+                {where}
+                ORDER BY t.{sort_by} {sort_order}
+                LIMIT ? OFFSET ?""",
+            params + [per_page, offset],
+        ).fetchall()
+
+    return {
+        "items": [dict(r) for r in rows],
+        "total": count,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@router.get("/{txn_id}")
+def get_transaction(txn_id: int):
+    with db_connection() as conn:
+        row = conn.execute(
+            """SELECT t.*, c1.name as category_name, c2.name as subcategory_name
+               FROM transactions t
+               LEFT JOIN categories c1 ON t.category_id = c1.id
+               LEFT JOIN categories c2 ON t.subcategory_id = c2.id
+               WHERE t.id = ?""",
+            (txn_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Transaction not found")
+        return dict(row)
+
+
+@router.put("/{txn_id}")
+def update_transaction(txn_id: int, update: TransactionUpdate):
+    with db_connection() as conn:
+        existing = conn.execute(
+            "SELECT * FROM transactions WHERE id = ?", (txn_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(404, "Transaction not found")
+
+        fields = []
+        params = []
+
+        if update.date is not None:
+            fields.append("date = ?")
+            params.append(update.date.isoformat())
+        if update.raw_description is not None:
+            from services.normalizer import normalize_description
+            fields.append("raw_description = ?")
+            params.append(update.raw_description)
+            fields.append("cleaned_description = ?")
+            params.append(normalize_description(update.raw_description))
+        if update.amount is not None:
+            fields.append("amount = ?")
+            params.append(update.amount)
+        if update.category_id is not None:
+            fields.append("category_id = ?")
+            params.append(update.category_id)
+            fields.append("is_categorized = 1")
+        if update.subcategory_id is not None:
+            fields.append("subcategory_id = ?")
+            params.append(update.subcategory_id)
+
+        if fields:
+            params.append(txn_id)
+            conn.execute(f"UPDATE transactions SET {', '.join(fields)} WHERE id = ?", params)
+
+        # Save correction example if user changed category
+        if update.category_id is not None:
+            conn.execute(
+                """INSERT OR IGNORE INTO correction_examples (description, category_id, subcategory_id)
+                   VALUES (?, ?, ?)""",
+                (existing["cleaned_description"], update.category_id, update.subcategory_id),
+            )
+
+    return {"status": "ok"}
+
+
+@router.delete("/{txn_id}")
+def delete_transaction(txn_id: int):
+    with db_connection() as conn:
+        conn.execute("DELETE FROM transactions WHERE id = ?", (txn_id,))
+    return {"status": "ok"}
+
+
+@router.post("/bulk-update")
+def bulk_update(update: BulkUpdate):
+    with db_connection() as conn:
+        for txn_id in update.ids:
+            if update.category_id is not None:
+                conn.execute(
+                    "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1 WHERE id = ?",
+                    (update.category_id, update.subcategory_id, txn_id),
+                )
+    return {"status": "ok"}
+
+
+@router.delete("/bulk-delete")
+def bulk_delete(delete: BulkDelete):
+    with db_connection() as conn:
+        for txn_id in delete.ids:
+            conn.execute("DELETE FROM transactions WHERE id = ?", (txn_id,))
+    return {"status": "ok"}
+
+
+@router.post("/categorize", response_model=CategorizeResult)
+def categorize_all():
+    from services.categorizer import categorize_batch
+
+    with db_connection() as conn:
+        uncategorized = conn.execute(
+            "SELECT id FROM transactions WHERE is_categorized = 0"
+        ).fetchall()
+
+    if not uncategorized:
+        return {"total": 0, "categorized": 0, "failed": 0}
+
+    txn_ids = [r["id"] for r in uncategorized]
+    return categorize_batch(txn_ids)
+
+
+@router.post("/{txn_id}/categorize")
+def categorize_single(txn_id: int):
+    from services.categorizer import categorize_transaction
+
+    with db_connection() as conn:
+        txn = conn.execute(
+            "SELECT cleaned_description, amount FROM transactions WHERE id = ?",
+            (txn_id,),
+        ).fetchone()
+        if not txn:
+            raise HTTPException(404, "Transaction not found")
+
+    result = categorize_transaction(txn["cleaned_description"], txn["amount"])
+    if result.get("category_id"):
+        with db_connection() as conn:
+            conn.execute(
+                "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1 WHERE id = ?",
+                (result["category_id"], result.get("subcategory_id"), txn_id),
+            )
+        return {"status": "categorized", **result}
+
+    return {"status": "failed", "error": result.get("error", "Unknown error")}

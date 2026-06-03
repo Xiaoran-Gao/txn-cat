@@ -1,0 +1,128 @@
+from pydantic import BaseModel, Field
+from datetime import date, datetime
+from typing import Optional
+
+
+class CategoryCreate(BaseModel):
+    name: str
+    parent_id: Optional[int] = None
+
+
+class CategoryUpdate(BaseModel):
+    name: str
+
+
+class CategoryOut(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    children: list["CategoryOut"] = []
+
+
+class TransactionCreate(BaseModel):
+    date: date
+    description: str
+    amount: float
+    currency: str = "CNY"
+
+
+class TransactionUpdate(BaseModel):
+    date: Optional[date] = None
+    raw_description: Optional[str] = None
+    amount: Optional[float] = None
+    category_id: Optional[int] = None
+    subcategory_id: Optional[int] = None
+
+
+class TransactionOut(BaseModel):
+    id: int
+    date: date
+    raw_description: str
+    cleaned_description: str
+    amount: float
+    currency: str
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    subcategory_id: Optional[int] = None
+    subcategory_name: Optional[str] = None
+    source: str
+    is_categorized: bool
+    created_at: datetime
+
+
+class TransactionList(BaseModel):
+    items: list[TransactionOut]
+    total: int
+    page: int
+    per_page: int
+
+
+class BulkUpdate(BaseModel):
+    ids: list[int]
+    category_id: Optional[int] = None
+    subcategory_id: Optional[int] = None
+
+
+class BulkDelete(BaseModel):
+    ids: list[int]
+
+
+class ImportResult(BaseModel):
+    imported: int
+    skipped: int
+    errors: list[str]
+
+
+class CategorizeResult(BaseModel):
+    total: int
+    categorized: int
+    failed: int
+
+
+class MerchantMappingCreate(BaseModel):
+    pattern: str
+    display_name: str
+    is_regex: bool = False
+
+
+class MerchantMappingOut(BaseModel):
+    id: int
+    pattern: str
+    display_name: str
+    is_regex: bool
+
+
+class NLQueryRequest(BaseModel):
+    question: str
+
+
+class NLQueryResponse(BaseModel):
+    answer: str
+    sql: str
+    data: Optional[list[dict]] = None
+
+
+class AnalysisSummary(BaseModel):
+    month: str
+    total_spend: float
+    total_income: float
+    transaction_count: int
+    mom_change_pct: Optional[float] = None
+    top_category: Optional[str] = None
+
+
+class CategoryTrend(BaseModel):
+    category_id: int
+    category_name: str
+    trend_pct: float  # positive = up, negative = down
+    trend_label: str   # "up 15%", "down 8%", "stable"
+
+
+class AnomalyItem(BaseModel):
+    type: str  # "category_spike" | "unusual_transaction"
+    category_name: Optional[str] = None
+    transaction_id: Optional[int] = None
+    description: Optional[str] = None
+    amount: Optional[float] = None
+    expected: Optional[float] = None
+    detail: str

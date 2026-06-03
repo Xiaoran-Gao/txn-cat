@@ -1,1 +1,1 @@
-# TxnCatAI
+# txn-cat
