@@ -1,7 +1,8 @@
 import json
 import re
+import urllib.request
 import ollama
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, MAX_CORRECTION_EXAMPLES
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_CORRECTION_EXAMPLES
 from database import db_connection
 
 # ──────────────────────────────────────────────
@@ -48,21 +49,50 @@ REVIEWER_PROMPT = """你是一个交易分类审核助手。审核以下分类�
 
 只返回JSON对象，不要其他内容。"""
 
+UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述和金额，完成商户名提取和交易分类。
+
+可选分类：
+{category_tree}
+
+{corrections}
+
+{refund_context}
+
+规则：
+- merchant_name 输出清晰的商户/交易对方名称，不要解释。
+- category 必须从一级分类中选择。
+- subcategory 必须从该一级分类的二级分类中选择。
+- 不确定时选择 "其他" > "其他"，不要编造分类名。
+- 金额小于 0 通常表示收入或退款，请结合描述判断。
+- 只返回 JSON，不要输出 Markdown 或解释。
+
+JSON 格式：
+{{"merchant_name":"...","category":"...","subcategory":"..."}}"""
+
 
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
 
-def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.1) -> str:
-    client = ollama.Client(host=OLLAMA_BASE_URL)
-    response = client.chat(
-        model=OLLAMA_MODEL,
-        messages=[
+def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.1, num_predict: int = 256) -> str:
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        options={"temperature": temperature},
+        "stream": False,
+        "think": False,
+        "options": {"temperature": temperature, "num_predict": num_predict},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
+    with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
+        response = json.loads(res.read().decode("utf-8"))
     return response["message"]["content"].strip()
 
 
@@ -72,6 +102,19 @@ def _extract_json(text: str) -> dict | None:
     text = re.sub(r"\s*```", "", text)
     json_match = re.search(r"\{[^{}]*\}", text)
     if not json_match:
+        return None
+
+
+def _extract_json_array(text: str) -> list[dict] | None:
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```", "", text)
+    json_match = re.search(r"\[[\s\S]*\]", text)
+    if not json_match:
+        return None
+    try:
+        data = json.loads(json_match.group(0))
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
         return None
     try:
         return json.loads(json_match.group(0))
@@ -260,32 +303,30 @@ def agent_review(
 # ──────────────────────────────────────────────
 
 def categorize_transaction(description: str, amount: float) -> dict:
-    """Run the full 3-agent categorization pipeline."""
-
-    # Step 1: Normalize the description
-    norm_result = agent_normalize(description)
-    if not norm_result["success"]:
-        return {"category_id": None, "subcategory_id": None, "error": f"Normalizer: {norm_result.get('error')}"}
-
-    merchant_name = norm_result["merchant_name"]
-
-    # Step 2: Categorize the clean merchant name
-    cat_result = agent_categorize(merchant_name, amount, description)
-    if not cat_result["success"]:
-        return {"category_id": None, "subcategory_id": None, "error": f"Categorizer: {cat_result.get('error')}"}
-
-    category_name = cat_result.get("category_name", "")
-    subcategory_name = cat_result.get("subcategory_name", "")
-
-    # Step 3: Review and refine
-    review_result = agent_review(
-        description, merchant_name, amount, category_name, subcategory_name
+    """Classify one transaction with a single Ollama call."""
+    category_tree = _build_category_tree()
+    corrections = _build_corrections()
+    refund_context = _find_refund_candidates(description, amount)
+    system_prompt = UNIFIED_CLASSIFY_PROMPT.format(
+        category_tree=category_tree,
+        corrections=corrections,
+        refund_context=refund_context,
     )
 
-    if not review_result.get("approved", True):
-        # Reviewer suggested a correction — use it
-        category_name = review_result.get("category", category_name)
-        subcategory_name = review_result.get("subcategory", subcategory_name)
+    try:
+        content = _call_llm(
+            system_prompt,
+            f'交易描述："{description}"\n交易金额：{amount}',
+        )
+        result = _extract_json(content)
+        if not result:
+            return {"category_id": None, "subcategory_id": None, "error": "No JSON in response"}
+    except Exception as e:
+        return {"category_id": None, "subcategory_id": None, "error": str(e)}
+
+    merchant_name = result.get("merchant_name") or description
+    category_name = result.get("category", "")
+    subcategory_name = result.get("subcategory", "")
 
     # Resolve names to IDs
     parent_id = _get_category_id(category_name)
@@ -297,14 +338,12 @@ def categorize_transaction(description: str, amount: float) -> dict:
             "subcategory_id": None,
             "error": f"Category not found: {category_name}",
             "merchant_name": merchant_name,
-            "reviewed": not review_result.get("approved", True),
         }
 
     return {
         "category_id": parent_id,
         "subcategory_id": sub_id,
         "merchant_name": merchant_name,
-        "reviewed": not review_result.get("approved", True),
     }
 
 
@@ -314,45 +353,84 @@ def categorize_batch(txn_ids: list[int]) -> dict:
     failed = 0
 
     with db_connection() as conn:
-        for txn_id in txn_ids:
-            txn = conn.execute(
-                "SELECT cleaned_description, raw_description, amount FROM transactions WHERE id = ?",
-                (txn_id,),
-            ).fetchone()
-            if not txn:
-                failed += 1
-                continue
+        rows = conn.execute(
+            """SELECT id, cleaned_description, raw_description, amount
+               FROM transactions
+               WHERE id IN ({})""".format(",".join("?" for _ in txn_ids)),
+            txn_ids,
+        ).fetchall()
 
-            # Use cleaned_description as input — rule-based normalizer already stripped
-            # mechanical noise so the LLM Normalizer can focus on semantic extraction
-            desc = txn["cleaned_description"] or txn["raw_description"]
+        for start in range(0, len(rows), 20):
+            chunk = rows[start:start + 20]
+            results = categorize_many_with_llm(chunk)
+            by_id = {int(r.get("id")): r for r in results if r.get("id") is not None}
 
-            result = categorize_transaction(desc, txn["amount"])
+            for txn in chunk:
+                result = by_id.get(txn["id"])
+                if not result:
+                    failed += 1
+                    continue
 
-            if result.get("category_id"):
-                # If the normalizer produced a better merchant name, update cleaned_description
-                merchant = result.get("merchant_name")
-                if merchant and merchant != txn["cleaned_description"]:
-                    conn.execute(
-                        "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1, cleaned_description = ? WHERE id = ?",
-                        (result["category_id"], result.get("subcategory_id"), merchant, txn_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1 WHERE id = ?",
-                        (result["category_id"], result.get("subcategory_id"), txn_id),
-                    )
+                category_id = _get_category_id(result.get("category", ""))
+                subcategory_id = _get_category_id(result.get("subcategory", ""), category_id) if category_id else None
+                if not category_id:
+                    failed += 1
+                    continue
+
+                merchant = result.get("merchant_name") or txn["cleaned_description"] or txn["raw_description"]
+                conn.execute(
+                    """UPDATE transactions
+                       SET category_id = ?, subcategory_id = ?, is_categorized = 1, cleaned_description = ?
+                       WHERE id = ?""",
+                    (category_id, subcategory_id, merchant, txn["id"]),
+                )
                 categorized += 1
-            else:
-                failed += 1
 
     return {"total": total, "categorized": categorized, "failed": failed}
 
 
+def categorize_many_with_llm(rows) -> list[dict]:
+    category_tree = _build_category_tree()
+    corrections = _build_corrections()
+    items = [
+        {
+            "id": r["id"],
+            "description": r["cleaned_description"] or r["raw_description"],
+            "amount": r["amount"],
+        }
+        for r in rows
+    ]
+    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类、二级分类。
+
+可选分类：
+{category_tree}
+
+用户纠正记录：
+{corrections}
+
+规则：
+- 每个输入 id 必须返回一条结果。
+- category 必须从一级分类中选择。
+- subcategory 必须从对应二级分类中选择。
+- 不确定时选择 "其他" > "其他"。
+- 只返回 JSON 数组，不要 Markdown 或解释。
+
+数组元素格式：
+{{"id":1,"merchant_name":"...","category":"...","subcategory":"..."}}"""
+    content = _call_llm(
+        system_prompt,
+        json.dumps(items, ensure_ascii=False),
+        temperature=0,
+        num_predict=2048,
+    )
+    return _extract_json_array(content) or []
+
+
 def check_ollama() -> bool:
     try:
-        client = ollama.Client(host=OLLAMA_BASE_URL)
-        client.list()
-        return True
+        client = ollama.Client(host=OLLAMA_BASE_URL, timeout=10)
+        models = client.list()
+        names = {m.get("name") or m.get("model") for m in models.get("models", [])}
+        return OLLAMA_MODEL in names
     except Exception:
         return False

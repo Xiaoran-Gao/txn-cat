@@ -23,6 +23,7 @@ def import_transactions(file: UploadFile = File(...)):
     imported = 0
     skipped = 0
     errors = []
+    imported_ids = []
 
     with db_connection() as conn:
         for txn in transactions:
@@ -38,15 +39,41 @@ def import_transactions(file: UploadFile = File(...)):
                     continue
 
                 conn.execute(
-                    """INSERT INTO transactions (date, raw_description, cleaned_description, amount)
-                       VALUES (?, ?, ?, ?)""",
-                    (txn["date"], txn["description"], cleaned, txn["amount"]),
+                    """INSERT INTO transactions (date, raw_description, cleaned_description, amount, account_name, payment_channel)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        txn["date"],
+                        txn["description"],
+                        cleaned,
+                        txn["amount"],
+                        txn.get("account_name"),
+                        txn.get("payment_channel"),
+                    ),
                 )
+                imported_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
                 imported += 1
             except Exception as e:
                 errors.append(f"Row error: {str(e)}")
 
-    return {"imported": imported, "skipped": skipped, "errors": errors}
+    categorized = 0
+    categorize_failed = 0
+    if imported_ids:
+        try:
+            from services.categorizer import categorize_batch
+            result = categorize_batch(imported_ids)
+            categorized = result["categorized"]
+            categorize_failed = result["failed"]
+        except Exception as e:
+            categorize_failed = len(imported_ids)
+            errors.append(f"Auto categorization failed: {str(e)}")
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors,
+        "categorized": categorized,
+        "categorize_failed": categorize_failed,
+    }
 
 
 @router.post("")
@@ -54,9 +81,9 @@ def create_transaction(txn: TransactionCreate):
     cleaned = normalize_description(txn.description)
     with db_connection() as conn:
         cur = conn.execute(
-            """INSERT INTO transactions (date, raw_description, cleaned_description, amount, currency, source)
-               VALUES (?, ?, ?, ?, ?, 'manual')""",
-            (txn.date.isoformat(), txn.description, cleaned, txn.amount, txn.currency),
+            """INSERT INTO transactions (date, raw_description, cleaned_description, amount, currency, account_name, payment_channel, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')""",
+            (txn.date.isoformat(), txn.description, cleaned, txn.amount, txn.currency, txn.account_name, txn.payment_channel),
         )
         return {"id": cur.lastrowid, "cleaned_description": cleaned}
 
@@ -169,6 +196,12 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
         if update.amount is not None:
             fields.append("amount = ?")
             params.append(update.amount)
+        if update.account_name is not None:
+            fields.append("account_name = ?")
+            params.append(update.account_name)
+        if update.payment_channel is not None:
+            fields.append("payment_channel = ?")
+            params.append(update.payment_channel)
         if update.category_id is not None:
             fields.append("category_id = ?")
             params.append(update.category_id)

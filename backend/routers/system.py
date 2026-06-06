@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from database import db_connection
 from services.categorizer import check_ollama
-from config import OLLAMA_MODEL
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from models import MerchantMappingCreate
 
 router = APIRouter()
@@ -31,7 +31,7 @@ def list_models():
     if not check_ollama():
         return {"models": [], "error": "Ollama not available"}
     import ollama
-    client = ollama.Client()
+    client = ollama.Client(host=OLLAMA_BASE_URL)
     models = client.list()
     return {"models": [m.get("name", str(m)) for m in models.get("models", [])]}
 

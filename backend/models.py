@@ -24,12 +24,16 @@ class TransactionCreate(BaseModel):
     description: str
     amount: float
     currency: str = "CNY"
+    account_name: Optional[str] = None
+    payment_channel: Optional[str] = None
 
 
 class TransactionUpdate(BaseModel):
     date: Optional[date] = None
     raw_description: Optional[str] = None
     amount: Optional[float] = None
+    account_name: Optional[str] = None
+    payment_channel: Optional[str] = None
     category_id: Optional[int] = None
     subcategory_id: Optional[int] = None
 
@@ -41,6 +45,8 @@ class TransactionOut(BaseModel):
     cleaned_description: str
     amount: float
     currency: str
+    account_name: Optional[str] = None
+    payment_channel: Optional[str] = None
     category_id: Optional[int] = None
     category_name: Optional[str] = None
     subcategory_id: Optional[int] = None
@@ -71,6 +77,8 @@ class ImportResult(BaseModel):
     imported: int
     skipped: int
     errors: list[str]
+    categorized: int = 0
+    categorize_failed: int = 0
 
 
 class CategorizeResult(BaseModel):

@@ -44,6 +44,8 @@ def init_db():
             cleaned_description TEXT NOT NULL,
             amount REAL NOT NULL,
             currency TEXT DEFAULT 'CNY',
+            account_name TEXT,
+            payment_channel TEXT,
             category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             source TEXT DEFAULT 'import',
@@ -71,3 +73,9 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_txn_subcategory ON transactions(subcategory_id);
         CREATE INDEX IF NOT EXISTS idx_txn_categorized ON transactions(is_categorized);
         """)
+
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+        if "account_name" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN account_name TEXT")
+        if "payment_channel" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN payment_channel TEXT")

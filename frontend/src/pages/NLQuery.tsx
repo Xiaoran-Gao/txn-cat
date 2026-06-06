@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { api } from "../api/client";
+import { Bot, DatabaseZap, Send, Sparkles, User } from "lucide-react";
+import type { NLQueryResult } from "../types";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
   sql?: string;
-  data?: Record<string, any>[] | null;
+  data?: NLQueryResult["data"];
 }
 
 const EXAMPLE_QUESTIONS = [
@@ -45,18 +47,25 @@ export default function NLQuery() {
   };
 
   return (
-    <div>
-      <div className="page-header"><h1>智能问答</h1></div>
-      <div className="chat-container">
+    <div className="surface">
+      <div className="page-header app-hero">
+        <div>
+          <h1>智能问答</h1>
+          <p>把中文问题转换成安全的只读 SQL，并把答案还给你。</p>
+        </div>
+        <div className="hero-chip"><DatabaseZap size={16} /> Read-only SQL</div>
+      </div>
+      <div className="chat-container modern-chat">
         <div className="chat-messages">
           {messages.length === 0 && (
             <div className="empty-state">
-              <p style={{ fontSize: 32 }}>💬</p>
+              <div className="empty-icon"><Sparkles size={28} /></div>
               <p>用自然语言询问你的消费情况</p>
             </div>
           )}
           {messages.map((m, i) => (
             <div key={i} className={`chat-msg ${m.role}`}>
+              <div className="message-icon">{m.role === "user" ? <User size={15} /> : <Bot size={15} />}</div>
               <div>{m.content}</div>
               {m.sql && <div className="sql">{m.sql}</div>}
               {m.data && m.data.length > 0 && (
@@ -73,7 +82,7 @@ export default function NLQuery() {
               )}
             </div>
           ))}
-          {loading && <div className="chat-msg assistant">思考中...</div>}
+          {loading && <div className="chat-msg assistant"><div className="message-icon"><Bot size={15} /></div>思考中...</div>}
           <div ref={endRef} />
         </div>
         <div className="suggestions">
@@ -88,7 +97,7 @@ export default function NLQuery() {
             onKeyDown={(e) => e.key === "Enter" && send(input)}
             placeholder="输入问题，例如：上个月我在外卖上花了多少钱？"
           />
-          <button className="btn btn-primary" onClick={() => send(input)} disabled={loading}>发送</button>
+          <button className="icon-submit" onClick={() => send(input)} disabled={loading} title="发送"><Send size={18} /></button>
         </div>
       </div>
     </div>

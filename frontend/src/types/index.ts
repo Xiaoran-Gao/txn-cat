@@ -5,6 +5,8 @@ export interface Transaction {
   cleaned_description: string;
   amount: number;
   currency: string;
+  account_name: string | null;
+  payment_channel: string | null;
   category_id: number | null;
   category_name: string | null;
   subcategory_id: number | null;
@@ -12,6 +14,16 @@ export interface Transaction {
   source: string;
   is_categorized: number;
   created_at: string;
+}
+
+export interface TransactionUpdateInput {
+  date?: string;
+  raw_description?: string;
+  amount?: number;
+  account_name?: string | null;
+  payment_channel?: string | null;
+  category_id?: number | null;
+  subcategory_id?: number | null;
 }
 
 export interface Category {
@@ -25,6 +37,8 @@ export interface ImportResult {
   imported: number;
   skipped: number;
   errors: string[];
+  categorized: number;
+  categorize_failed: number;
 }
 
 export interface SummaryData {
@@ -56,7 +70,7 @@ export interface AnomalyItem {
 export interface NLQueryResult {
   answer: string;
   sql: string;
-  data: Record<string, any>[] | null;
+  data: Record<string, string | number | boolean | null>[] | null;
 }
 
 export interface MerchantMapping {

@@ -1,8 +1,28 @@
-# TxnCatAI — AI-Powered Personal Financial Assistant
+# TxnCatAI — Local Transaction Intelligence
 
 ## Overview
 
-A local-first web application that ingests bank card transactions (Excel/CSV or manual entry), cleans and normalizes merchant descriptions, categorizes transactions using a local LLM (Ollama 8B), and provides spending analysis and natural language querying through a web dashboard. Single-user, privacy-preserving — all data and AI processing stays on the machine. Primary language: Chinese (transactions and UI).
+A local-first web application for a monthly personal finance ritual: manually upload the latest bank, Alipay, WeChat, or card statement as Excel/CSV, let the system parse and deduplicate transactions, clean merchant descriptions, categorize spending with a local LLM (Ollama 8B), then review a monthly dashboard and ask questions in Chinese. Single-user, privacy-preserving — all transaction data, SQLite storage, and AI processing stays on the machine. Primary language: Chinese (transactions and UI).
+
+The product should feel upload-first, not report-first. The home screen is the starting point for the month: a clear bill upload entry, local privacy status, import progress/results, and the fastest path into classification, spending trends, and natural-language questions.
+
+---
+
+## Product Workflow
+
+1. **Upload this month's bill**: The user drags in or selects an Excel/CSV statement from a bank, Alipay, WeChat, or card account.
+2. **Understand the bill format**: The app detects payment channel, account, date, description, and amount columns. It uses deterministic header/sample heuristics first and asks the local LLM to map columns when the format is ambiguous.
+3. **Parse, deduplicate, and classify**: The app imports new rows, skips duplicates, stores account/channel metadata, and automatically runs local Ollama categorization for newly imported transactions.
+4. **Review monthly dashboard**: After upload, the home screen refreshes into a dashboard with spend, income, category mix, trend movement, and classification coverage.
+5. **Ask the ledger**: The user asks questions in Chinese, backed by read-only SQL over the local transaction database.
+
+### Primary Screens
+
+- **Home / Upload Center**: The default route. Provides the main upload dropzone, import/classification result, monthly status, local privacy indicators, charts, and entry points into transaction review and AI questions.
+- **Transactions**: Detailed transaction table for filtering, correction, recategorization, and manual edits.
+- **AI Query**: Conversational analysis for spending questions and drill-downs.
+- **Categories**: Category tree management.
+- **Settings**: Local model, database, and merchant mapping controls.
 
 ---
 
@@ -14,7 +34,7 @@ A local-first web application that ingests bank card transactions (Excel/CSV or 
 | Database | SQLite | Zero-config, single-file, perfect for single-user local use |
 | AI | Ollama (local 8B model) | Local inference, no data leaves the machine |
 | Frontend | React + Recharts | Component-rich dashboard, good charting library |
-| File Parsing | Pandas + openpyxl | Robust Excel (.xlsx/.xls) and CSV handling with column detection |
+| File Parsing | Pandas + openpyxl + Ollama-assisted mapping | Robust Excel/CSV handling across bank, Alipay, and WeChat statement formats |
 | Packaging | Docker (optional) | One-command startup if desired |
 
 ---
@@ -24,28 +44,37 @@ A local-first web application that ingests bank card transactions (Excel/CSV or 
 ### Phase 1 — MVP
 
 #### 1. Transaction Ingestion
-- **Excel Import**: Upload .xlsx/.xls file; system auto-detects columns (`date`, `description`, `amount`) by header name matching and type inference. Supports both Chinese and English column headers (e.g., "交易日期"/"date", "交易说明"/"description", "金额"/"amount").
-- **CSV Import**: Also supports CSV as a secondary format.
+- **Excel Import**: Upload .xlsx/.xls file; system auto-detects transaction columns (`date`, `description`, `amount` or `expense/income`) by header matching, sample inspection, and AI-assisted mapping when needed.
+- **CSV Import**: Supports CSV with Chinese locale encodings (UTF-8/GB18030/GBK/Big5), preamble rows, and common delimiters (comma, tab, semicolon, pipe).
+- **Home Upload Center**: The home screen exposes the primary drag-and-drop/file-picker upload interaction and shows import + automatic classification feedback.
+- **Payment Channel Detection**: Detect Alipay, WeChat Pay, and common bank sources from filename, preamble text, column headers, and channel/account columns.
+- **Account Metadata**: Store `account_name` and `payment_channel` per transaction when available; display real account/channel values instead of generated labels.
 - **Manual Entry**: A form to add a single transaction (date, description, amount).
 - **Duplicate Detection**: On import, skip transactions that match an existing row on (date, description, amount).
 
-#### 2. Data Pipeline — Cleaning & AI Categorization
+#### 2. Data Pipeline — Format Understanding, Cleaning & AI Categorization
 
-The system processes each transaction through a two-phase pipeline:
+The system processes uploads through a three-phase pipeline:
 
-**Phase A — Rule-Based Pre-Cleaning** (on import, non-LLM):
+**Phase A — Statement Format Understanding**:
+- Runs during upload before row import.
+- Detects CSV encoding, delimiter, preamble rows, payment channel, account metadata, and transaction table header.
+- Maps date/description/amount columns with deterministic rules first.
+- If required columns remain ambiguous, sends column names and a small sample of rows to local Ollama and asks for a structured column mapping.
+
+**Phase B — Rule-Based Pre-Cleaning** (on import, non-LLM):
 - Runs automatically on import and manual entry. Fast, deterministic, no LLM call.
 - Strips mechanical noise via regex: transaction IDs, reference numbers, dates, redundant suffixes ("消费", "快捷支付").
 - Does NOT do semantic replacement (that's the LLM's job).
 - Stores both `raw_description` (original) and `cleaned_description` (pre-cleaned).
 
-**Phase B — 3-Agent LLM Categorization** (on demand, uses Ollama):
-- Each transaction goes through three specialized agents sequentially:
-  1. **Normalizer Agent** — Receives the pre-cleaned description from Phase A. Extracts the core merchant name, preserving key business words ("外卖", "便利店", "加油站"). Outputs a clean merchant name.
-  2. **Categorizer Agent** — Assigns `category > subcategory` based on the clean merchant name, the full category tree, recent user corrections (few-shot), and refund context (if applicable).
-  3. **Reviewer Agent** — Validates the assignment against the original description and amount. If the classification seems wrong, overrides with a corrected category/subcategory.
-- **Batch Processing**: Categorize all uncategorized transactions in one go.
-- **Fallback**: If any agent fails, the transaction is left uncategorized for manual review.
+**Phase C — Local LLM Categorization**:
+- Runs automatically for newly imported transactions after dedupe.
+- Uses Ollama locally; there is no rule-based category fallback.
+- Batches multiple transactions in a single prompt to reduce slow local-model round trips.
+- For each transaction, the LLM returns `{merchant_name, category, subcategory}`.
+- Uses the editable category tree and recent user corrections as prompt context.
+- If a category/subcategory cannot be resolved or Ollama fails, the transaction remains uncategorized for manual review.
 
 **Category Hierarchy** (two-level, Chinese, user-editable):
   - 餐饮美食 (餐馆, 快餐, 外卖, 咖啡饮品, 零食)
@@ -70,7 +99,7 @@ The system processes each transaction through a two-phase pipeline:
 - **Correction Management**: View and clear stored corrections in Settings.
 
 #### 4. Transaction Management
-- **List View**: Paginated, sortable, filterable table (by date range, category, amount range, source).
+- **List View**: Paginated, sortable, filterable table (by date range, category, account/channel, amount range, source).
 - **Search**: Free-text search on description.
 - **Edit/Delete**: Modify any transaction field or remove it.
 - **Bulk Operations**: Select multiple and re-categorize or delete.
@@ -90,28 +119,32 @@ The system processes each transaction through a two-phase pipeline:
   - "这个月有没有特别大额的异常交易？"
 - **Safety**: Only SELECT queries are allowed. The LLM prompt instructs read-only SQL generation.
 
+#### 7. Monthly Dashboard
+- **Upload Status**: Show whether the current local ledger has data, how many transactions were imported, how many were automatically categorized, and how many remain uncategorized.
+- **Summary Cards**: Monthly spend, income, transaction count, and categorization coverage.
+- **Trend Preview**: Recent month spend/income trend after import.
+- **Category Structure**: Top spending categories and uncategorized share.
+- **Next Actions**: Guide users to transaction review or natural language questions after automatic import/classification.
+
 ---
 
 ### Phase 2 — Analysis & Insights (Future)
 
-#### 8. Spending Dashboard
-- Summary cards, category pie/bar charts, monthly spend over time, category drill-down.
-
-#### 9. Trend Detection
+#### 8. Trend Detection
 - Per-category linear trends over 6–12 months. Highlight fastest-growing categories.
 
-#### 10. Anomaly Detection
+#### 9. Anomaly Detection
 - Per-category spend vs 3-month moving average (2σ threshold).
 - Unusual single transactions via IQR method.
 
-#### 11. Export
+#### 10. Export
 - Export filtered transactions to Excel/CSV.
 
 ---
 
 ### Phase 3 — Advanced (Future)
 
-#### 12. Photo Upload (OCR)
+#### 11. Photo Upload (OCR)
 - Upload photos of bank card transaction records (screenshots, receipts, paper statements).
 - OCR extraction of transaction details: date, description, amount from images.
 - Auto-import extracted transactions into the system for categorization and analysis.
@@ -135,6 +168,8 @@ CREATE TABLE transactions (
     cleaned_description TEXT NOT NULL,   -- after merchant normalization
     amount REAL NOT NULL,
     currency TEXT DEFAULT 'CNY',
+    account_name TEXT,                  -- parsed account/card/wallet label when available
+    payment_channel TEXT,               -- e.g. Alipay, WeChat Pay, bank name
     category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     source TEXT DEFAULT 'import',        -- 'import' | 'manual'
@@ -164,7 +199,7 @@ CREATE TABLE correction_examples (
 
 ### Transactions
 ```
-POST   /api/transactions/import          - Excel/CSV file upload
+POST   /api/transactions/import          - Excel/CSV file upload, parse, dedupe, auto-categorize new rows
 POST   /api/transactions                 - Create single transaction
 GET    /api/transactions                 - List (query: page, per_page, start_date, end_date,
                                            category_id, subcategory_id, search, is_categorized,
@@ -174,7 +209,7 @@ PUT    /api/transactions/:id             - Update transaction
 DELETE /api/transactions/:id             - Delete transaction
 POST   /api/transactions/bulk-update     - Bulk update category
 DELETE /api/transactions/bulk-delete     - Bulk delete
-POST   /api/transactions/categorize      - Trigger AI categorization for all uncategorized
+POST   /api/transactions/categorize      - Trigger AI categorization for all uncategorized rows
 POST   /api/transactions/:id/categorize  - Re-categorize single transaction with AI
 ```
 
@@ -216,68 +251,48 @@ GET    /api/system/models                 - List available Ollama models
 
 ## LLM Prompt Design (Chinese)
 
-### Agent 1 — Normalizer
+### Statement Column Mapping
+
+Used only when deterministic header/sample detection cannot confidently identify required fields.
 
 ```
-你是一个银行交易描述清洗助手。从交易描述中提取标准化的商户名称。
-
-规则：
-- 描述文本已经过初步清洗（去除了交易ID、日期等数字噪音）
-- 提取核心商户名称，保留品牌名和关键业务词（如"外卖""便利店""加油站"）
-- 如果是退款类交易（包含"退款""退货""退费"），保留退款关键词
-- 如果描述已经很简洁清晰，直接返回原文
-- 只返回清洗后的商户名称，不要任何解释或其他内容
+你是账单表格列映射助手。根据列名和样本行判断每一列的语义。
+只返回 JSON，值必须是原始列名或 null。不要解释。
+字段：date_col, desc_col, amount_col, expense_col, income_col, account_col, channel_col。
+如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。
 ```
 
-### Agent 2 — Categorizer
+Input payload:
 
-```
-你是一个银行交易分类助手。根据商户名称和金额，将交易归类到下面的二级分类体系中。
-
-可选分类：
-- 餐饮美食: 餐馆, 快餐, 外卖, 咖啡饮品, 零食
-- 交通出行: 公共交通, 加油充电, 打车代驾, 停车费, 汽车维修
-- 购物消费: 服饰鞋包, 数码电器, 家居日用, 网购, 商超百货
-- 休闲娱乐: 视频会员, 电影演出, 游戏, 运动健身, 图书
-- 住房居家: 房租房贷, 水电燃气, 物业费, 通讯宽带, 维修
-- 医疗健康: 药店, 医院诊所, 体检, 保险
-- 金融理财: 银行手续费, 利息收支, 投资理财, 信用卡还款
-- 旅行出行: 机票, 酒店, 火车票, 景点游玩
-- 教育学习: 培训, 资料, 学费
-- 收入: 工资, 兼职, 退款, 理财收益
-- 其他: 其他
-
-用户最近的纠正记录（请优先参考）：
-- "美团外卖" → 餐饮美食 > 外卖
-- "滴滴出行" → 交通出行 > 打车代驾
-
-{refund_context}
-
-规则：
-- 仔细分析商户名称的含义
-- 不确定时选择"其他 > 其他"，不要随意猜测
-- 只返回JSON对象，包含"category"和"subcategory"字段，不要输出其他内容
+```json
+{
+  "columns": ["..."],
+  "sample_rows": [{ "...": "..." }]
+}
 ```
 
-### Agent 3 — Reviewer
+### Batch Transaction Categorization
+
+Used after import for newly inserted rows, and for manual recategorization batches. The model classifies a chunk of transactions in one call.
 
 ```
-你是一个交易分类审核助手。审核以下分类结果是否合理。
-
-交易信息：
-- 原始描述：{raw_description}
-- 商户名称：{merchant_name}
-- 交易金额：{amount}
-- 当前分类：{category} > {subcategory}
+你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类、二级分类。
 
 可选分类：
 {category_tree}
 
-请判断分类是否合理：
-- 如果合理，返回 {"approved": true}
-- 如果不合理，返回 {"approved": false, "category": "...", "subcategory": "...", "reason": "..."}
+用户纠正记录：
+{corrections}
 
-只返回JSON对象，不要其他内容。
+规则：
+- 每个输入 id 必须返回一条结果。
+- category 必须从一级分类中选择。
+- subcategory 必须从对应二级分类中选择。
+- 不确定时选择 "其他" > "其他"。
+- 只返回 JSON 数组，不要 Markdown 或解释。
+
+数组元素格式：
+{"id":1,"merchant_name":"...","category":"...","subcategory":"..."}
 ```
 
 ### NL Query Prompt

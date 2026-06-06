@@ -1,9 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { api } from "../api/client";
 import type { MerchantMapping } from "../types";
+import { Database, Plus, RadioTower, ServerCog, Trash2 } from "lucide-react";
+
+type HealthStatus = Awaited<ReturnType<typeof api.health>>;
 
 export default function Settings() {
-  const [health, setHealth] = useState<any>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [merchants, setMerchants] = useState<MerchantMapping[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
@@ -32,30 +35,42 @@ export default function Settings() {
   };
 
   return (
-    <div>
+    <div className="surface">
       {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
-      <div className="page-header"><h1>设置</h1></div>
+      <div className="page-header app-hero">
+        <div>
+          <h1>设置</h1>
+          <p>检查本地运行状态，维护商户映射和模型环境。</p>
+        </div>
+      </div>
 
-      <div className="card">
-        <h2 style={{ fontSize: 16, marginBottom: 12 }}>系统状态</h2>
+      <div className="settings-grid">
+      <div className="settings-panel">
+        <div className="panel-heading"><ServerCog size={18} /><strong>系统状态</strong></div>
         {health ? (
-          <div style={{ display: "flex", gap: 20, fontSize: 14 }}>
-            <StatusBadge label="数据库" ok={health.database} />
-            <StatusBadge label="Ollama" ok={health.ollama} />
-            <span>模型: {health.ollama_model}</span>
+          <div className="status-grid">
+            <StatusBadge icon={<Database size={16} />} label="数据库" ok={health.database} />
+            <StatusBadge icon={<RadioTower size={16} />} label="Ollama" ok={health.ollama} />
+            <div className="status-card">
+              <span>模型</span>
+              <strong>{health.ollama_model}</strong>
+            </div>
           </div>
         ) : (
           <span style={{ color: "#999" }}>加载中...</span>
         )}
       </div>
 
-      <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h2 style={{ fontSize: 16, margin: 0 }}>商户名称映射</h2>
-          <button className="btn btn-sm btn-primary" onClick={() => setShowAdd(true)}>添加映射</button>
+      <div className="settings-panel mappings-panel">
+        <div className="table-toolbar">
+          <div>
+            <strong>商户名称映射</strong>
+            <span>{merchants.length} 条规则</span>
+          </div>
+          <button className="btn btn-sm btn-primary" onClick={() => setShowAdd(true)}><Plus size={14} />添加映射</button>
         </div>
-        <p style={{ fontSize: 13, color: "#999", marginBottom: 12 }}>
-          将交易描述中的关键词映射为标准化商户名，用于数据清洗。例如："美团" → "美团"。
+        <p className="muted-copy">
+          将交易描述中的关键词映射为标准化商户名，用于数据清洗。
         </p>
         <table>
           <thead><tr><th>匹配模式</th><th>显示名称</th><th>操作</th></tr></thead>
@@ -67,12 +82,13 @@ export default function Settings() {
                 <tr key={m.id}>
                   <td><code>{m.pattern}</code></td>
                   <td>{m.display_name}</td>
-                  <td><button className="btn btn-sm btn-danger" onClick={() => handleDeleteMerchant(m.id)}>删除</button></td>
+                  <td><button className="icon-btn danger" onClick={() => handleDeleteMerchant(m.id)} title="删除"><Trash2 size={14} /></button></td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
+      </div>
       </div>
 
       {showAdd && <MerchantForm onSave={handleAddMerchant} onClose={() => setShowAdd(false)} />}
@@ -80,12 +96,12 @@ export default function Settings() {
   );
 }
 
-function StatusBadge({ label, ok }: { label: string; ok: boolean }) {
+function StatusBadge({ icon, label, ok }: { icon: ReactNode; label: string; ok: boolean }) {
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-      <span style={{ width: 8, height: 8, borderRadius: "50%", background: ok ? "#22c55e" : "#ef4444", display: "inline-block" }} />
-      {label}: {ok ? "正常" : "异常"}
-    </span>
+    <div className="status-card">
+      <div>{icon}<span>{label}</span></div>
+      <strong className={ok ? "ok-text" : "danger-text"}>{ok ? "正常" : "异常"}</strong>
+    </div>
   );
 }
 

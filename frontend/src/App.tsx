@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
+import Home from "./pages/Home";
 import Transactions from "./pages/Transactions";
 import NLQuery from "./pages/NLQuery";
 import Categories from "./pages/Categories";
@@ -10,7 +11,7 @@ export default function App() {
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/" element={<Transactions />} />
+          <Route path="/" element={<Home />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/query" element={<NLQuery />} />
           <Route path="/categories" element={<Categories />} />

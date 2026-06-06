@@ -1,13 +1,55 @@
-const BASE = "http://localhost:8000/api";
+import type {
+  AnomalyItem,
+  Category,
+  ImportResult,
+  MerchantMapping,
+  NLQueryResult,
+  SummaryData,
+  Transaction,
+  TransactionUpdateInput,
+  TrendItem,
+} from "../types";
+
+const API_HOST = window.location.hostname || "localhost";
+const BASE = `http://${API_HOST}:8000/api`;
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+
+async function readErrorMessage(res: Response): Promise<string> {
+  const msg = await res.text();
+  if (!msg) return `HTTP ${res.status}`;
+  try {
+    const data = JSON.parse(msg) as { detail?: string };
+    return data.detail || msg;
+  } catch {
+    return msg;
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch {
+    throw new Error("无法连接本地后端，请先启动 FastAPI 服务。");
+  }
   if (!res.ok) {
-    const msg = await res.text();
-    throw new Error(msg || `HTTP ${res.status}`);
+    throw new Error(await readErrorMessage(res));
+  }
+  return res.json();
+}
+
+async function upload<T>(path: string, body: FormData): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, { method: "POST", body });
+  } catch {
+    throw new Error("无法连接本地后端，请先启动 FastAPI 服务。");
+  }
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res));
   }
   return res.json();
 }
@@ -17,50 +59,50 @@ export const api = {
   importFile: (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return fetch(`${BASE}/transactions/import`, { method: "POST", body: form }).then((r) => r.json());
+    return upload<ImportResult>("/transactions/import", form);
   },
   createTransaction: (data: { date: string; description: string; amount: number }) =>
-    request(`${BASE}/transactions`, { method: "POST", body: JSON.stringify(data) }),
-  listTransactions: (params: Record<string, string | number | boolean>) => {
+    request<{ id: number; cleaned_description: string }>("/transactions", { method: "POST", body: JSON.stringify(data) }),
+  listTransactions: (params: QueryParams) => {
     const qs = new URLSearchParams();
-    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== "") qs.set(k, String(v)); });
-    return request(`${BASE}/transactions?${qs}`);
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
+    return request<{ items: Transaction[]; total: number; page: number; per_page: number }>(`/transactions?${qs}`);
   },
-  getTransaction: (id: number) => request(`${BASE}/transactions/${id}`),
-  updateTransaction: (id: number, data: any) =>
-    request(`${BASE}/transactions/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteTransaction: (id: number) => request(`${BASE}/transactions/${id}`, { method: "DELETE" }),
-  bulkUpdate: (data: { ids: number[]; category_id?: number; subcategory_id?: number }) =>
-    request(`${BASE}/transactions/bulk-update`, { method: "POST", body: JSON.stringify(data) }),
+  getTransaction: (id: number) => request<Transaction>(`/transactions/${id}`),
+  updateTransaction: (id: number, data: TransactionUpdateInput) =>
+    request<{ status: string }>(`/transactions/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteTransaction: (id: number) => request<{ status: string }>(`/transactions/${id}`, { method: "DELETE" }),
+  bulkUpdate: (data: { ids: number[]; category_id?: number | null; subcategory_id?: number | null }) =>
+    request<{ status: string }>("/transactions/bulk-update", { method: "POST", body: JSON.stringify(data) }),
   bulkDelete: (ids: number[]) =>
-    request(`${BASE}/transactions/bulk-delete`, { method: "DELETE", body: JSON.stringify({ ids }) }),
-  categorizeAll: () => request(`${BASE}/transactions/categorize`, { method: "POST" }),
-  categorizeOne: (id: number) => request(`${BASE}/transactions/${id}/categorize`, { method: "POST" }),
+    request<{ status: string }>("/transactions/bulk-delete", { method: "DELETE", body: JSON.stringify({ ids }) }),
+  categorizeAll: () => request<{ total: number; categorized: number; failed: number }>("/transactions/categorize", { method: "POST" }),
+  categorizeOne: (id: number) => request<{ status: string }>(`/transactions/${id}/categorize`, { method: "POST" }),
 
   // Categories
-  listCategories: () => request<any[]>(`${BASE}/categories`),
+  listCategories: () => request<Category[]>("/categories"),
   createCategory: (data: { name: string; parent_id?: number }) =>
-    request(`${BASE}/categories`, { method: "POST", body: JSON.stringify(data) }),
+    request<{ id: number }>("/categories", { method: "POST", body: JSON.stringify(data) }),
   updateCategory: (id: number, data: { name: string }) =>
-    request(`${BASE}/categories/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+    request<{ status: string }>(`/categories/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteCategory: (id: number, reassignTo?: number) =>
-    request(`${BASE}/categories/${id}?${reassignTo ? `reassign_to=${reassignTo}` : ""}`, { method: "DELETE" }),
+    request<{ status: string }>(`/categories/${id}?${reassignTo ? `reassign_to=${reassignTo}` : ""}`, { method: "DELETE" }),
 
   // Analysis
-  summary: (month: string) => request(`${BASE}/analysis/summary?month=${month}`),
-  trends: (months = 12) => request(`${BASE}/analysis/trends?months=${months}`),
-  anomalies: (month: string) => request(`${BASE}/analysis/anomalies?month=${month}`),
-  monthlySpend: (months = 12) => request(`${BASE}/analysis/monthly-spend?months=${months}`),
+  summary: (month: string) => request<SummaryData>(`/analysis/summary?month=${month}`),
+  trends: (months = 12) => request<TrendItem[]>(`/analysis/trends?months=${months}`),
+  anomalies: (month: string) => request<AnomalyItem[]>(`/analysis/anomalies?month=${month}`),
+  monthlySpend: (months = 12) => request<{ categories: string[]; data: Record<string, string | number>[] }>(`/analysis/monthly-spend?months=${months}`),
 
   // NL Query
   query: (question: string) =>
-    request(`${BASE}/query`, { method: "POST", body: JSON.stringify({ question }) }),
+    request<NLQueryResult>("/query", { method: "POST", body: JSON.stringify({ question }) }),
 
   // System
-  health: () => request(`${BASE}/system/health`),
-  models: () => request(`${BASE}/system/models`),
-  merchants: () => request(`${BASE}/system/merchants`),
+  health: () => request<{ database: boolean; ollama: boolean; ollama_model: string }>("/system/health"),
+  models: () => request<{ models: string[]; error?: string }>("/system/models"),
+  merchants: () => request<MerchantMapping[]>("/system/merchants"),
   createMerchant: (data: { pattern: string; display_name: string; is_regex: boolean }) =>
-    request(`${BASE}/system/merchants`, { method: "POST", body: JSON.stringify(data) }),
-  deleteMerchant: (id: number) => request(`${BASE}/system/merchants/${id}`, { method: "DELETE" }),
+    request<{ id: number }>("/system/merchants", { method: "POST", body: JSON.stringify(data) }),
+  deleteMerchant: (id: number) => request<{ status: string }>(`/system/merchants/${id}`, { method: "DELETE" }),
 };
