@@ -11,8 +11,7 @@ import type {
   TrendItem,
 } from "../types";
 
-const API_HOST = window.location.hostname || "localhost";
-const BASE = `http://${API_HOST}:8000/api`;
+const BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
 type QueryParams = Record<string, string | number | boolean | null | undefined>;
 
 async function readErrorMessage(res: Response): Promise<string> {

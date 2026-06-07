@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+data/
+*.db
+*.db-shm
+*.db-wal
+
+frontend/dist/
+frontend/node_modules/
