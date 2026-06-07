@@ -1,6 +1,7 @@
 import type {
   AnomalyItem,
   Category,
+  ClassificationJob,
   ImportResult,
   MerchantMapping,
   NLQueryResult,
@@ -76,8 +77,9 @@ export const api = {
     request<{ status: string }>("/transactions/bulk-update", { method: "POST", body: JSON.stringify(data) }),
   bulkDelete: (ids: number[]) =>
     request<{ status: string }>("/transactions/bulk-delete", { method: "DELETE", body: JSON.stringify({ ids }) }),
-  categorizeAll: () => request<{ total: number; categorized: number; failed: number }>("/transactions/categorize", { method: "POST" }),
+  categorizeAll: () => request<{ total: number; categorized: number; failed: number; job_id: string | null }>("/transactions/categorize", { method: "POST" }),
   categorizeOne: (id: number) => request<{ status: string }>(`/transactions/${id}/categorize`, { method: "POST" }),
+  categorizeJob: (id: string) => request<ClassificationJob>(`/transactions/categorize/jobs/${id}`),
 
   // Categories
   listCategories: () => request<Category[]>("/categories"),
@@ -99,8 +101,8 @@ export const api = {
     request<NLQueryResult>("/query", { method: "POST", body: JSON.stringify({ question }) }),
 
   // System
-  health: () => request<{ database: boolean; ollama: boolean; ollama_model: string }>("/system/health"),
-  models: () => request<{ models: string[]; error?: string }>("/system/models"),
+  health: () => request<{ database: boolean; ollama: boolean; ollama_model: string; ollama_model_active: string | null; ollama_error: string | null }>("/system/health"),
+  models: () => request<{ models: string[]; active_model?: string | null; error?: string }>("/system/models"),
   merchants: () => request<MerchantMapping[]>("/system/merchants"),
   createMerchant: (data: { pattern: string; display_name: string; is_regex: boolean }) =>
     request<{ id: number }>("/system/merchants", { method: "POST", body: JSON.stringify(data) }),

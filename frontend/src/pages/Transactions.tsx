@@ -9,7 +9,7 @@ import {
   Tooltip,
 } from "recharts";
 import { api } from "../api/client";
-import type { Category, ImportResult, Transaction } from "../types";
+import type { Category, ClassificationJob, ImportResult, Transaction } from "../types";
 import {
   Bot,
   BriefcaseBusiness,
@@ -56,6 +56,7 @@ export default function Transactions() {
   const [editing, setEditing] = useState<Transaction | null>(null);
   const [importing, setImporting] = useState(false);
   const [categorizing, setCategorizing] = useState(false);
+  const [classificationJob, setClassificationJob] = useState<ClassificationJob | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [activeInsight, setActiveInsight] = useState(0);
@@ -98,6 +99,31 @@ export default function Transactions() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  useEffect(() => {
+    if (!classificationJob || classificationJob.status === "done" || classificationJob.status === "failed") return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.categorizeJob(classificationJob.id);
+        setClassificationJob(next);
+        if (next.status === "done" || next.status === "failed") {
+          window.clearInterval(timer);
+          setCategorizing(false);
+          if (next.error) {
+            showToast(next.error, "error");
+          } else {
+            showToast(`分类完成：成功 ${next.categorized} 条，失败 ${next.failed} 条`, next.failed ? "error" : "success");
+          }
+          load();
+        }
+      } catch (err) {
+        window.clearInterval(timer);
+        setCategorizing(false);
+        showToast(err instanceof Error ? err.message : "分类进度读取失败", "error");
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [classificationJob, load]);
+
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -105,7 +131,25 @@ export default function Transactions() {
     try {
       const result = await api.importFile(file);
       setImportResult(result);
-      showToast(`导入完成：新增 ${result.imported} 条，自动分类 ${result.categorized} 条`);
+      if (result.classification_job_id) {
+        setCategorizing(true);
+        setClassificationJob({
+          id: result.classification_job_id,
+          source: "upload",
+          status: "queued",
+          total: result.classification_total,
+          processed: 0,
+          categorized: 0,
+          failed: 0,
+          message: "等待开始 LLM 分类",
+          error: null,
+          created_at: "",
+          updated_at: "",
+        });
+        showToast(`导入完成：新增 ${result.imported} 条，开始自动分类`);
+      } else {
+        showToast(`导入完成：新增 ${result.imported} 条`);
+      }
       load();
     } catch {
       showToast("导入失败", "error");
@@ -118,12 +162,28 @@ export default function Transactions() {
     setCategorizing(true);
     try {
       const result = await api.categorizeAll();
-      showToast(`分类完成：${result.categorized} 条，失败 ${result.failed} 条`);
-      load();
+      if (result.job_id) {
+        setClassificationJob({
+          id: result.job_id,
+          source: "manual",
+          status: "queued",
+          total: result.total,
+          processed: 0,
+          categorized: 0,
+          failed: 0,
+          message: "等待开始 LLM 分类",
+          error: null,
+          created_at: "",
+          updated_at: "",
+        });
+      } else {
+        showToast("没有待分类交易");
+        setCategorizing(false);
+      }
     } catch {
       showToast("分类失败，请检查 Ollama 是否运行", "error");
+      setCategorizing(false);
     }
-    setCategorizing(false);
   };
 
   const handleDelete = async (id: number) => {
@@ -268,9 +328,22 @@ export default function Transactions() {
       {importResult && (
         <div className="import-banner">
           <CheckCircle2 size={18} />
-          <span>导入完成：新增 <b>{importResult.imported}</b> 条，自动分类 <b>{importResult.categorized}</b> 条，跳过重复 <b>{importResult.skipped}</b> 条</span>
+          <span>导入完成：新增 <b>{importResult.imported}</b> 条，待分类 <b>{importResult.classification_total}</b> 条，跳过重复 <b>{importResult.skipped}</b> 条</span>
           {importResult.errors.length > 0 && <span className="danger-text">，{importResult.errors.length} 条错误</span>}
           <button className="ghost-link" onClick={() => setImportResult(null)}>关闭</button>
+        </div>
+      )}
+
+      {classificationJob && (
+        <div className="import-banner">
+          <Loader2 className={classificationJob.status === "queued" || classificationJob.status === "running" ? "spin" : ""} size={18} />
+          <span>
+            <b>{classificationJob.message}</b>：
+            {classificationJob.processed}/{classificationJob.total}
+            ，成功 <b>{classificationJob.categorized}</b> 条，失败 <b>{classificationJob.failed}</b> 条
+          </span>
+          {classificationJob.error && <span className="danger-text">，{classificationJob.error}</span>}
+          <button className="ghost-link" onClick={() => setClassificationJob(null)}>关闭</button>
         </div>
       )}
 

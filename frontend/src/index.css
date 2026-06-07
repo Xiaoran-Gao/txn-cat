@@ -455,6 +455,21 @@ a {
   gap: 18px;
 }
 
+.upload-gateway {
+  display: grid;
+  gap: 18px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.gateway-hero {
+  min-height: 560px;
+}
+
+.gateway-status {
+  grid-column: 1 / -1;
+}
+
 .home-grid.upload-first {
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
 }
@@ -613,6 +628,50 @@ a {
 .upload-error {
   color: #b42318;
   background: rgba(254, 242, 242, 0.92);
+}
+
+.classification-progress {
+  width: min(100%, 420px);
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid rgba(31, 122, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  text-align: left;
+}
+
+.classification-progress > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.classification-progress strong {
+  color: #071426;
+  font-size: 13px;
+}
+
+.classification-progress span {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eef7;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1f7aff, #22c55e);
+  transition: width 240ms ease;
 }
 
 .home-metrics {

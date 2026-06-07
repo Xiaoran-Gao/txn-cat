@@ -12,10 +12,12 @@ import {
   ReceiptText,
   Search,
   Settings,
+  UploadCloud,
 } from "lucide-react";
 
 const navItems = [
-  { to: "/", label: "首页", icon: LayoutDashboard },
+  { to: "/", label: "上传", icon: UploadCloud },
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/transactions", label: "交易记录", icon: ReceiptText },
   { to: "/query", label: "智能问答", icon: MessageSquareText },
   { to: "/categories", label: "分类管理", icon: FolderTree },

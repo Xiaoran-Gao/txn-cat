@@ -53,7 +53,10 @@ export default function Settings() {
             <StatusBadge icon={<RadioTower size={16} />} label="Ollama" ok={health.ollama} />
             <div className="status-card">
               <span>模型</span>
-              <strong>{health.ollama_model}</strong>
+              <strong>{health.ollama_model_active || health.ollama_model}</strong>
+              {health.ollama_model_active && health.ollama_model_active !== health.ollama_model && (
+                <small>配置 {health.ollama_model}</small>
+              )}
             </div>
           </div>
         ) : (

@@ -1,8 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks
 from database import db_connection
 from models import (
     TransactionCreate, TransactionUpdate, TransactionOut,
-    BulkUpdate, BulkDelete, ImportResult, CategorizeResult,
+    BulkUpdate, BulkDelete, ImportResult, CategorizeResult, ClassificationJobOut,
 )
 from services.parser import parse_excel
 from services.normalizer import normalize_description
@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 @router.post("/import", response_model=ImportResult)
-def import_transactions(file: UploadFile = File(...)):
+def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     if not (file.filename.lower().endswith((".xlsx", ".xls", ".csv"))):
         raise HTTPException(400, "Unsupported file format. Use .xlsx, .xls, or .csv")
 
@@ -24,17 +24,20 @@ def import_transactions(file: UploadFile = File(...)):
     skipped = 0
     errors = []
     imported_ids = []
+    pending_existing_ids = []
 
     with db_connection() as conn:
         for txn in transactions:
             try:
                 cleaned = normalize_description(txn["description"])
                 existing = conn.execute(
-                    """SELECT id FROM transactions
+                    """SELECT id, is_categorized FROM transactions
                        WHERE date = ? AND raw_description = ? AND amount = ?""",
                     (txn["date"], txn["description"], txn["amount"]),
                 ).fetchone()
                 if existing:
+                    if not existing["is_categorized"]:
+                        pending_existing_ids.append(existing["id"])
                     skipped += 1
                     continue
 
@@ -57,15 +60,13 @@ def import_transactions(file: UploadFile = File(...)):
 
     categorized = 0
     categorize_failed = 0
-    if imported_ids:
-        try:
-            from services.categorizer import categorize_batch
-            result = categorize_batch(imported_ids)
-            categorized = result["categorized"]
-            categorize_failed = result["failed"]
-        except Exception as e:
-            categorize_failed = len(imported_ids)
-            errors.append(f"Auto categorization failed: {str(e)}")
+    classification_job_id = None
+    categorize_ids = list(dict.fromkeys(imported_ids + pending_existing_ids))
+    if categorize_ids:
+        from services.classification_jobs import create_classification_job, run_classification_job
+        job = create_classification_job(categorize_ids, source="upload")
+        classification_job_id = job["id"]
+        background_tasks.add_task(run_classification_job, classification_job_id)
 
     return {
         "imported": imported,
@@ -73,6 +74,8 @@ def import_transactions(file: UploadFile = File(...)):
         "errors": errors,
         "categorized": categorized,
         "categorize_failed": categorize_failed,
+        "classification_job_id": classification_job_id,
+        "classification_total": len(categorize_ids),
     }
 
 
@@ -253,19 +256,29 @@ def bulk_delete(delete: BulkDelete):
 
 
 @router.post("/categorize", response_model=CategorizeResult)
-def categorize_all():
-    from services.categorizer import categorize_batch
-
+def categorize_all(background_tasks: BackgroundTasks):
     with db_connection() as conn:
         uncategorized = conn.execute(
-            "SELECT id FROM transactions WHERE is_categorized = 0"
+            "SELECT id FROM transactions WHERE is_categorized = 0 OR category_id IS NULL"
         ).fetchall()
 
     if not uncategorized:
-        return {"total": 0, "categorized": 0, "failed": 0}
+        return {"total": 0, "categorized": 0, "failed": 0, "job_id": None}
 
     txn_ids = [r["id"] for r in uncategorized]
-    return categorize_batch(txn_ids)
+    from services.classification_jobs import create_classification_job, run_classification_job
+    job = create_classification_job(txn_ids, source="manual")
+    background_tasks.add_task(run_classification_job, job["id"])
+    return {"total": job["total"], "categorized": 0, "failed": 0, "job_id": job["id"]}
+
+
+@router.get("/categorize/jobs/{job_id}", response_model=ClassificationJobOut)
+def get_categorize_job(job_id: str):
+    from services.classification_jobs import get_classification_job
+    job = get_classification_job(job_id)
+    if not job:
+        raise HTTPException(404, "Classification job not found")
+    return job
 
 
 @router.post("/{txn_id}/categorize")

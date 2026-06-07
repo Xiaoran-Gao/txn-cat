@@ -39,6 +39,22 @@ export interface ImportResult {
   errors: string[];
   categorized: number;
   categorize_failed: number;
+  classification_job_id: string | null;
+  classification_total: number;
+}
+
+export interface ClassificationJob {
+  id: string;
+  source: string;
+  status: "queued" | "running" | "done" | "failed";
+  total: number;
+  processed: number;
+  categorized: number;
+  failed: number;
+  message: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SummaryData {

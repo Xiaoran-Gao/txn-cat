@@ -79,12 +79,29 @@ class ImportResult(BaseModel):
     errors: list[str]
     categorized: int = 0
     categorize_failed: int = 0
+    classification_job_id: Optional[str] = None
+    classification_total: int = 0
 
 
 class CategorizeResult(BaseModel):
     total: int
     categorized: int
     failed: int
+    job_id: Optional[str] = None
+
+
+class ClassificationJobOut(BaseModel):
+    id: str
+    source: str
+    status: str
+    total: int
+    processed: int
+    categorized: int
+    failed: int
+    message: str
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
 
 
 class MerchantMappingCreate(BaseModel):
