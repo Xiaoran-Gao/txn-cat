@@ -146,7 +146,9 @@ function ProgressBar({ job, progress }: { job: ClassificationJob; progress: numb
         <strong>{job.message}</strong>
         <span>{job.processed}/{job.total} · 成功 {job.categorized} · 失败 {job.failed}</span>
       </div>
-      <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+      <div className={`progress-track ${job.status === "running" && job.processed < job.total ? "active" : ""}`}>
+        <span style={{ width: `${progress}%` }} />
+      </div>
     </div>
   );
 }

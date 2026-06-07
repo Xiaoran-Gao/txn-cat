@@ -73,7 +73,7 @@ def run_classification_job(job_id: str) -> None:
             total=total,
             categorized=int(progress.get("categorized", 0)),
             failed=int(progress.get("failed", 0)),
-            message=f"正在分类 {processed}/{total}" if not error else f"分类失败：{error}",
+            message=progress.get("message") or (f"正在分类 {processed}/{total}" if not error else f"分类失败：{error}"),
             error=error,
         )
 

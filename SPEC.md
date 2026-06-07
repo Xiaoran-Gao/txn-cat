@@ -172,6 +172,9 @@ CREATE TABLE transactions (
     payment_channel TEXT,               -- e.g. Alipay, WeChat Pay, bank name
     category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    classification_confidence INTEGER,  -- LLM self-rated confidence, 0-100
+    classification_review_status TEXT,  -- not_reviewed | review_approved | review_corrected | review_invalid | review_missing | manual
+    classification_review_reason TEXT,  -- short reviewer note when present
     source TEXT DEFAULT 'import',        -- 'import' | 'manual'
     is_categorized INTEGER DEFAULT 0,   -- 0 = pending, 1 = done
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -273,26 +276,52 @@ Input payload:
 
 ### Batch Transaction Categorization
 
-Used after import for newly inserted rows, and for manual recategorization batches. The model classifies a chunk of transactions in one call.
+Used after import for newly inserted rows, and for manual recategorization batches. The model classifies a chunk of transactions in one call and returns IDs plus an LLM self-rated confidence score. There is no rule-based category fallback; unparseable or invalid LLM outputs remain uncategorized or are retried through LLM only.
 
 ```
-你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类、二级分类。
+你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID、置信度。
 
-可选分类：
-{category_tree}
+分类表：
+{category_choices}
 
 用户纠正记录：
 {corrections}
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- category 必须从一级分类中选择。
-- subcategory 必须从对应二级分类中选择。
-- 不确定时选择 "其他" > "其他"。
-- 只返回 JSON 数组，不要 Markdown 或解释。
+- merchant_name 要短，只保留清晰的商户/交易对方名称。
+- category_id 必须选择一级分类 ID，不能使用二级分类 ID。
+- subcategory_id 必须属于该一级分类；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
+- confidence 输出 0-100 的整数，表示模型对分类的把握，不是统计学概率。
+- 如果输入含 refund_context，优先参考候选原始交易来判断退款分类。
+- 只返回 JSON 对象，不要 Markdown 或解释。
 
-数组元素格式：
-{"id":1,"merchant_name":"...","category":"...","subcategory":"..."}
+JSON 格式：
+{"results":[{"id":1,"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}]}
+```
+
+### Low-Confidence / Sample Review Agent
+
+After the batch classifier returns valid IDs, a second LLM reviewer pass is used only for:
+
+- low-confidence items below `OLLAMA_REVIEW_LOW_CONFIDENCE` (default 80)
+- deterministic sampled high-confidence items controlled by `OLLAMA_REVIEW_SAMPLE_RATE` (default 0.10)
+
+The reviewer does not use deterministic classification rules. It receives the candidate classification, category ID table, correction examples, raw/cleaned descriptions, amount, and confidence. It must return a valid category/subcategory ID pair or the original candidate is retained with a review status.
+
+Operational defaults prioritize local Ollama stability over maximum chunk size: `OLLAMA_BATCH_SIZE=16`, `OLLAMA_RETRY_BATCH_SIZE=8`, and `OLLAMA_MAX_RETRIES=3`. If Ollama returns 503 during classification, reduce batch size or review sample rate before increasing concurrency.
+
+```
+你是一个交易分类复核 agent。请审计候选分类，修正低置信或明显错误的分类。
+
+规则：
+- 每个输入 id 必须返回一条结果。
+- 如果候选分类合理，approved=true，并返回原 category_id/subcategory_id。
+- 如果候选分类不合理，approved=false，并返回修正后的 category_id/subcategory_id。
+- category_id 必须选择一级分类 ID；subcategory_id 必须属于该一级分类，不能编造 ID。
+- confidence 输出复核后的 0-100 整数。
+- reason 用一句很短的中文说明复核判断。
+- 只返回 JSON 对象，不要 Markdown 或解释。
 ```
 
 ### NL Query Prompt
@@ -309,6 +338,9 @@ CREATE TABLE transactions (
     amount REAL NOT NULL,
     category_id INTEGER,
     subcategory_id INTEGER,
+    classification_confidence INTEGER,
+    classification_review_status TEXT,
+    classification_review_reason TEXT,
     ...
 );
 
@@ -408,5 +440,6 @@ TxnCatAI/
 4. **Two Descriptions Stored**: `raw_description` (original) and `cleaned_description` (normalized). Both visible in UI.
 5. **NL Query Safety**: Read-only SQL generation only. LLM prompt enforces SELECT-only.
 6. **No Auth**: Local single-user tool.
-7. **Multi-Agent Categorization Pipeline**: Three specialized agents run sequentially — Normalizer (cleans merchant name), Categorizer (assigns category/subcategory), Reviewer (validates and corrects). Each agent has a narrow, focused task for better accuracy than a single prompt.
+7. **LLM-Only Categorization With Selective Review**: The main path is one batched LLM classifier for speed. Low-confidence results and a deterministic sample of high-confidence results go through a second LLM reviewer agent. Avoid fixed sequential multi-agent classification for every transaction because it multiplies local Ollama latency.
 8. **Refund Matching**: Refunds (negative amounts or descriptions with 退款/退货) are matched to candidate original transactions by amount similarity (±2% tolerance). Candidate transactions are included in the LLM prompt as context so the refund inherits the same category. Supports partial refunds (broader search by recency when exact amount doesn't match).
+9. **No Synthetic Analytics Data**: Dashboards, charts, confidence values, trends, and insight cards must be computed from persisted local data or explicit LLM outputs. Empty states are shown when no real data exists; do not display demo transactions, fake percentages, placeholder chart series, or fabricated confidence scores.

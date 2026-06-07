@@ -11,6 +11,9 @@ export interface Transaction {
   category_name: string | null;
   subcategory_id: number | null;
   subcategory_name: string | null;
+  classification_confidence: number | null;
+  classification_review_status: string | null;
+  classification_review_reason: string | null;
   source: string;
   is_categorized: number;
   created_at: string;

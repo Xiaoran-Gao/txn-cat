@@ -209,6 +209,9 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
             fields.append("category_id = ?")
             params.append(update.category_id)
             fields.append("is_categorized = 1")
+            fields.append("classification_confidence = NULL")
+            fields.append("classification_review_status = 'manual'")
+            fields.append("classification_review_reason = NULL")
         if update.subcategory_id is not None:
             fields.append("subcategory_id = ?")
             params.append(update.subcategory_id)
@@ -241,7 +244,14 @@ def bulk_update(update: BulkUpdate):
         for txn_id in update.ids:
             if update.category_id is not None:
                 conn.execute(
-                    "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1 WHERE id = ?",
+                    """UPDATE transactions
+                       SET category_id = ?,
+                           subcategory_id = ?,
+                           is_categorized = 1,
+                           classification_confidence = NULL,
+                           classification_review_status = 'manual',
+                           classification_review_reason = NULL
+                       WHERE id = ?""",
                     (update.category_id, update.subcategory_id, txn_id),
                 )
     return {"status": "ok"}
@@ -287,18 +297,32 @@ def categorize_single(txn_id: int):
 
     with db_connection() as conn:
         txn = conn.execute(
-            "SELECT cleaned_description, amount FROM transactions WHERE id = ?",
+            "SELECT cleaned_description, raw_description, amount FROM transactions WHERE id = ?",
             (txn_id,),
         ).fetchone()
         if not txn:
             raise HTTPException(404, "Transaction not found")
 
-    result = categorize_transaction(txn["cleaned_description"], txn["amount"])
+    result = categorize_transaction(txn["cleaned_description"], txn["amount"], txn["raw_description"])
     if result.get("category_id"):
         with db_connection() as conn:
             conn.execute(
-                "UPDATE transactions SET category_id = ?, subcategory_id = ?, is_categorized = 1 WHERE id = ?",
-                (result["category_id"], result.get("subcategory_id"), txn_id),
+                """UPDATE transactions
+                   SET category_id = ?,
+                       subcategory_id = ?,
+                       is_categorized = 1,
+                       classification_confidence = ?,
+                       classification_review_status = ?,
+                       classification_review_reason = ?
+                   WHERE id = ?""",
+                (
+                    result["category_id"],
+                    result.get("subcategory_id"),
+                    result.get("classification_confidence"),
+                    result.get("classification_review_status"),
+                    result.get("classification_review_reason"),
+                    txn_id,
+                ),
             )
         return {"status": "categorized", **result}
 

@@ -51,6 +51,9 @@ class TransactionOut(BaseModel):
     category_name: Optional[str] = None
     subcategory_id: Optional[int] = None
     subcategory_name: Optional[str] = None
+    classification_confidence: Optional[int] = None
+    classification_review_status: Optional[str] = None
+    classification_review_reason: Optional[str] = None
     source: str
     is_categorized: bool
     created_at: datetime

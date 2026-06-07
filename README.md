@@ -42,9 +42,14 @@ The default model is configured in `backend/config.py`:
 ```text
 OLLAMA_MODEL=qwen3:8b
 OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_BATCH_SIZE=16
+OLLAMA_RETRY_BATCH_SIZE=8
+OLLAMA_REVIEW_LOW_CONFIDENCE=80
+OLLAMA_REVIEW_SAMPLE_RATE=0.10
+OLLAMA_MAX_RETRIES=3
 ```
 
-You can override these with environment variables.
+You can override these with environment variables. Larger `OLLAMA_BATCH_SIZE` values reduce round trips but need more model context and may be slower or trigger Ollama 503s on small machines; lower it if JSON responses become incomplete or Ollama becomes unavailable. Low-confidence and sampled high-confidence results are reviewed by a second LLM pass, controlled by `OLLAMA_REVIEW_LOW_CONFIDENCE` and `OLLAMA_REVIEW_SAMPLE_RATE`.
 
 ## Start Ollama
 

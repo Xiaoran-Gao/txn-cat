@@ -48,6 +48,9 @@ def init_db():
             payment_channel TEXT,
             category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+            classification_confidence INTEGER,
+            classification_review_status TEXT,
+            classification_review_reason TEXT,
             source TEXT DEFAULT 'import',
             is_categorized INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -79,3 +82,9 @@ def init_db():
             conn.execute("ALTER TABLE transactions ADD COLUMN account_name TEXT")
         if "payment_channel" not in columns:
             conn.execute("ALTER TABLE transactions ADD COLUMN payment_channel TEXT")
+        if "classification_confidence" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN classification_confidence INTEGER")
+        if "classification_review_status" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN classification_review_status TEXT")
+        if "classification_review_reason" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN classification_review_reason TEXT")

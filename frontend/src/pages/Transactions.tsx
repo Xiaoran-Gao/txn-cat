@@ -33,10 +33,6 @@ import {
   WalletCards,
 } from "lucide-react";
 
-const sampleLines = [
-  { value: 34 }, { value: 31 }, { value: 38 }, { value: 36 }, { value: 45 }, { value: 40 }, { value: 48 },
-];
-
 const colorPool = ["#1f7aff", "#ff8a1f", "#22c55e", "#7c3aed", "#06b6d4", "#94a3b8"];
 
 export default function Transactions() {
@@ -256,12 +252,6 @@ export default function Transactions() {
       return acc;
     }, {});
     const entries = Object.entries(grouped).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    if (!entries.length) return [
-      { name: "餐饮食品", value: 36.2, color: "#1f7aff" },
-      { name: "购物消费", value: 22.1, color: "#ff8a1f" },
-      { name: "交通出行", value: 15.8, color: "#22c55e" },
-      { name: "其他", value: 25.9, color: "#94a3b8" },
-    ];
     return entries.map(([name, value], index) => ({ name, value, color: colorPool[index % colorPool.length] }));
   }, [txns]);
 
@@ -273,16 +263,7 @@ export default function Transactions() {
       else acc[day].income += Math.abs(txn.amount);
       return acc;
     }, {});
-    const result = Object.values(grouped).sort((a, b) => a.day.localeCompare(b.day)).slice(-12);
-    return result.length ? result : [
-      { day: "05-01", spend: 420, income: 0 },
-      { day: "05-06", spend: 610, income: 0 },
-      { day: "05-11", spend: 530, income: 2000 },
-      { day: "05-16", spend: 760, income: 0 },
-      { day: "05-21", spend: 690, income: 4680 },
-      { day: "05-26", spend: 880, income: 320 },
-      { day: "05-31", spend: 792, income: 18000 },
-    ];
+    return Object.values(grouped).sort((a, b) => a.day.localeCompare(b.day)).slice(-12);
   }, [txns]);
 
   const insights = [
@@ -296,11 +277,14 @@ export default function Transactions() {
     },
     {
       title: "趋势分析",
-      body: "餐饮和交通类交易适合做演示追问：金额、趋势、异常都比较容易讲清楚。",
+      body: trend.length ? `当前筛选结果包含 ${trend.length} 个交易日期，可在右侧查看收支走势。` : "当前筛选结果暂无趋势数据。",
     },
   ];
 
   const totalPages = Math.ceil(total / perPage);
+  const classificationProgress = classificationJob?.total
+    ? Math.round((classificationJob.processed / classificationJob.total) * 100)
+    : 0;
 
   return (
     <div className="transactions-workbench">
@@ -336,22 +320,29 @@ export default function Transactions() {
 
       {classificationJob && (
         <div className="import-banner">
-          <Loader2 className={classificationJob.status === "queued" || classificationJob.status === "running" ? "spin" : ""} size={18} />
-          <span>
-            <b>{classificationJob.message}</b>：
-            {classificationJob.processed}/{classificationJob.total}
-            ，成功 <b>{classificationJob.categorized}</b> 条，失败 <b>{classificationJob.failed}</b> 条
-          </span>
-          {classificationJob.error && <span className="danger-text">，{classificationJob.error}</span>}
+          <div className="classification-banner-body">
+            <div>
+              <Loader2 className={classificationJob.status === "queued" || classificationJob.status === "running" ? "spin" : ""} size={18} />
+              <span>
+                <b>{classificationJob.message}</b>：
+                {classificationJob.processed}/{classificationJob.total}
+                ，成功 <b>{classificationJob.categorized}</b> 条，失败 <b>{classificationJob.failed}</b> 条
+              </span>
+              {classificationJob.error && <span className="danger-text">，{classificationJob.error}</span>}
+            </div>
+            <div className={`progress-track ${classificationJob.status === "running" && classificationJob.processed < classificationJob.total ? "active" : ""}`}>
+              <span style={{ width: `${classificationProgress}%` }} />
+            </div>
+          </div>
           <button className="ghost-link" onClick={() => setClassificationJob(null)}>关闭</button>
         </div>
       )}
 
       <section className="stat-card-grid">
-        <StatCard label="总交易金额" value={`¥ ${(stats.income + stats.spend).toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="+8.41%" icon={<Eye size={14} />} tone="cyan" />
-        <StatCard label="收入金额" value={`¥ ${stats.income.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="+12.17%" icon={<WalletCards size={14} />} tone="green" />
-        <StatCard label="支出金额" value={`¥ ${stats.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="-18.35%" icon={<CircleDollarSign size={14} />} tone="blue" />
-        <StatCard label="交易笔数" value={String(stats.count)} delta="+5.31%" icon={<BriefcaseBusiness size={14} />} tone="violet" />
+        <StatCard label="总交易金额" value={`¥ ${(stats.income + stats.spend).toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<Eye size={14} />} tone="cyan" />
+        <StatCard label="收入金额" value={`¥ ${stats.income.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<WalletCards size={14} />} tone="green" />
+        <StatCard label="支出金额" value={`¥ ${stats.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<CircleDollarSign size={14} />} tone="blue" />
+        <StatCard label="交易笔数" value={String(stats.count)} meta="当前页/筛选" icon={<BriefcaseBusiness size={14} />} tone="violet" />
       </section>
 
       <div className="transaction-layout-grid">
@@ -441,7 +432,12 @@ export default function Transactions() {
                         {t.amount > 0 ? "-¥ " : "+¥ "}{Math.abs(t.amount).toFixed(2)}
                       </td>
                       <td><span className={t.is_categorized && t.category_name ? "status-chip confirmed" : "status-chip pending"}>{t.is_categorized && t.category_name ? "已确认" : "待确认"}</span></td>
-                      <td className="confidence-cell">{confidenceFor(t)}%</td>
+                      <td
+                        className="confidence-cell"
+                        title={reviewLabel(t.classification_review_status, t.classification_review_reason)}
+                      >
+                        {typeof t.classification_confidence === "number" ? `${t.classification_confidence}%` : "未计算"}
+                      </td>
                       <td>
                         <div className="inline-actions">
                           <button className="icon-btn" onClick={() => setEditing(t)} title="编辑"><Pencil size={15} /></button>
@@ -498,18 +494,24 @@ export default function Transactions() {
               <div><strong>本月支出概览</strong><span>分类占比</span></div>
             </div>
             <div className="donut-layout">
-              <ResponsiveContainer width="44%" height={170}>
-                <PieChart>
-                  <Pie data={categoryPie} dataKey="value" innerRadius={44} outerRadius={66} paddingAngle={3}>
-                    {categoryPie.map((item) => <Cell key={item.name} fill={item.color} />)}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="pie-legend compact">
-                {categoryPie.map((item) => (
-                  <div key={item.name}><span style={{ background: item.color }} /><strong>{item.name}</strong><em>{formatLegendValue(item.value)}</em></div>
-                ))}
-              </div>
+              {categoryPie.length ? (
+                <>
+                  <ResponsiveContainer width="44%" height={170}>
+                    <PieChart>
+                      <Pie data={categoryPie} dataKey="value" innerRadius={44} outerRadius={66} paddingAngle={3}>
+                        {categoryPie.map((item) => <Cell key={item.name} fill={item.color} />)}
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="pie-legend compact">
+                    {categoryPie.map((item) => (
+                      <div key={item.name}><span style={{ background: item.color }} /><strong>{item.name}</strong><em>{formatLegendValue(item.value)}</em></div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-chart-state">暂无支出分类数据</div>
+              )}
             </div>
           </section>
 
@@ -517,13 +519,17 @@ export default function Transactions() {
             <div className="panel-title">
               <div><strong>趋势分析</strong><span>收支走势</span></div>
             </div>
-            <ResponsiveContainer width="100%" height={150}>
-              <LineChart data={trend}>
-                <Tooltip />
-                <Line type="monotone" dataKey="spend" stroke="#1f7aff" strokeWidth={2.4} dot={false} />
-                <Line type="monotone" dataKey="income" stroke="#22c55e" strokeWidth={2.4} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            {trend.length ? (
+              <ResponsiveContainer width="100%" height={150}>
+                <LineChart data={trend}>
+                  <Tooltip />
+                  <Line type="monotone" dataKey="spend" stroke="#1f7aff" strokeWidth={2.4} dot={false} />
+                  <Line type="monotone" dataKey="income" stroke="#22c55e" strokeWidth={2.4} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="empty-chart-state">暂无收支趋势数据</div>
+            )}
           </section>
         </aside>
       </div>
@@ -534,19 +540,14 @@ export default function Transactions() {
   );
 }
 
-function StatCard({ label, value, delta, icon, tone }: { label: string; value: string; delta: string; icon: ReactNode; tone: string }) {
+function StatCard({ label, value, meta, icon, tone }: { label: string; value: string; meta: string; icon: ReactNode; tone: string }) {
   return (
     <div className={`stat-card ${tone}`}>
       <div>
         <span>{label} {icon}</span>
         <strong>{value}</strong>
-        <em>较上月 {delta}</em>
+        <em>{meta}</em>
       </div>
-      <ResponsiveContainer width={96} height={52}>
-        <LineChart data={sampleLines}>
-          <Line type="monotone" dataKey="value" stroke="currentColor" strokeWidth={2.2} dot={false} />
-        </LineChart>
-      </ResponsiveContainer>
     </div>
   );
 }
@@ -556,17 +557,25 @@ function getAccount(txn: Transaction) {
   return txn.account_name || txn.payment_channel || "导入账单";
 }
 
-function confidenceFor(txn: Transaction) {
-  if (!txn.is_categorized || !txn.category_name) return 82 + (txn.id % 8);
-  return 95 + (txn.id % 6);
-}
-
 function categoryTone(name: string) {
   if (name.includes("餐饮")) return "orange";
   if (name.includes("交通")) return "blue";
   if (name.includes("收入") || name.includes("理财")) return "green";
   if (name.includes("购物")) return "pink";
   return "violet";
+}
+
+function reviewLabel(status: string | null, reason: string | null) {
+  const labels: Record<string, string> = {
+    not_reviewed: "未复核",
+    review_approved: "复核通过",
+    review_corrected: "复核已修正",
+    review_invalid: "复核结果无效",
+    review_missing: "复核未返回",
+    manual: "人工分类",
+  };
+  const label = status ? labels[status] || status : "未复核";
+  return reason ? `${label}：${reason}` : label;
 }
 
 function formatLegendValue(value: number) {

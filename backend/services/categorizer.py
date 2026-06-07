@@ -1,54 +1,22 @@
 import json
 import re
+import time
 import urllib.request
+from urllib.error import HTTPError, URLError
 import ollama
 from functools import lru_cache
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_CORRECTION_EXAMPLES
+from config import (
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_TIMEOUT,
+    OLLAMA_BATCH_SIZE,
+    OLLAMA_RETRY_BATCH_SIZE,
+    OLLAMA_REVIEW_LOW_CONFIDENCE,
+    OLLAMA_REVIEW_SAMPLE_RATE,
+    OLLAMA_MAX_RETRIES,
+    MAX_CORRECTION_EXAMPLES,
+)
 from database import db_connection
-
-# ──────────────────────────────────────────────
-# Agent System Prompts
-# ──────────────────────────────────────────────
-
-NORMALIZER_PROMPT = """你是一个银行交易描述清洗助手。从交易描述中提取标准化的商户名称。
-
-规则：
-- 描述文本已经过初步清洗（去除了交易ID、日期等数字噪音）
-- 提取核心商户名称，保留品牌名和关键业务词（如"外卖""便利店""加油站"）
-- 如果是退款类交易（包含"退款""退货""退费"），保留退款关键词
-- 如果描述已经很简洁清晰，直接返回原文
-- 只返回清洗后的商户名称，不要任何解释或其他内容"""
-
-CATEGORIZER_PROMPT = """你是一个银行交易分类助手。根据商户名称和金额，将交易归类到下面的二级分类体系中。
-
-可选分类：
-{category_tree}
-
-{corrections}
-
-{refund_context}
-
-规则：
-- 仔细分析商户名称的含义
-- 不确定时选择"其他 > 其他"，不要随意猜测
-- 只返回JSON对象，包含"category"和"subcategory"字段，不要输出其他内容"""
-
-REVIEWER_PROMPT = """你是一个交易分类审核助手。审核以下分类结果是否合理。
-
-交易信息：
-- 原始描述：{raw_description}
-- 商户名称：{merchant_name}
-- 交易金额：{amount}
-- 当前分类：{category} > {subcategory}
-
-可选分类：
-{category_tree}
-
-请判断分类是否合理：
-- 如果合理，返回 {{"approved": true}}
-- 如果不合理，返回 {{"approved": false, "category": "...", "subcategory": "...", "reason": "..."}}
-
-只返回JSON对象，不要其他内容。"""
 
 UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述和金额，完成商户名提取和交易分类。
 
@@ -64,10 +32,11 @@ UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
 - subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
 - 金额小于 0 通常表示收入或退款，请结合描述判断。
+- confidence 输出 0-100 的整数，表示你对分类的把握，不要为了显得确定而虚高。
 - 只返回 JSON，不要输出 Markdown 或解释。
 
 JSON 格式：
-{{"merchant_name":"...","category_id":1,"subcategory_id":2}}"""
+{{"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}}"""
 
 
 # ──────────────────────────────────────────────
@@ -103,9 +72,24 @@ def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.1, nu
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
-        response = json.loads(res.read().decode("utf-8"))
-    return response["message"]["content"].strip()
+    attempts = max(1, OLLAMA_MAX_RETRIES)
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
+                response = json.loads(res.read().decode("utf-8"))
+            return response["message"]["content"].strip()
+        except HTTPError as exc:
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
+                detail = exc.read().decode("utf-8", errors="ignore").strip()
+                detail_text = f": {detail}" if detail else ""
+                raise RuntimeError(f"Ollama HTTP {exc.code}{detail_text}") from exc
+            time.sleep(1.5 * (attempt + 1))
+        except URLError as exc:
+            if attempt == attempts - 1:
+                raise RuntimeError(f"Ollama connection failed: {exc.reason}") from exc
+            time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError("Ollama request failed after retries")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -154,6 +138,28 @@ def _extract_json_array(text: str) -> list[dict] | None:
 def _short_response(text: str, limit: int = 240) -> str:
     compact = re.sub(r"\s+", " ", text or "").strip()
     return compact[:limit] + ("..." if len(compact) > limit else "")
+
+
+def _clean_confidence(value) -> int | None:
+    try:
+        confidence = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, confidence))
+
+
+def _clamp_batch_size(value: int, default: int, minimum: int, maximum: int) -> int:
+    if value < minimum:
+        return default
+    return min(value, maximum)
+
+
+def _clamp_sample_rate(value: float) -> float:
+    if value < 0:
+        return 0
+    if value > 1:
+        return 1
+    return value
 
 
 def _ollama_model_name(model) -> str | None:
@@ -370,89 +376,14 @@ def _find_refund_candidates(description: str, amount: float) -> str:
 
 
 # ──────────────────────────────────────────────
-# Agents
-# ──────────────────────────────────────────────
-
-def agent_normalize(description: str) -> dict:
-    """Agent 1: Normalize transaction description into a clean merchant name."""
-    try:
-        merchant_name = _call_llm(NORMALIZER_PROMPT, f'交易描述："{description}"')
-        return {"merchant_name": merchant_name or description, "success": True}
-    except Exception as e:
-        return {"merchant_name": description, "success": False, "error": str(e)}
-
-
-def agent_categorize(merchant_name: str, amount: float, raw_description: str) -> dict:
-    """Agent 2: Categorize the transaction based on the cleaned merchant name."""
-    category_tree = _build_category_tree()
-    corrections = _build_corrections()
-    refund_context = _find_refund_candidates(raw_description, amount)
-
-    system_prompt = CATEGORIZER_PROMPT.format(
-        category_tree=category_tree,
-        corrections=corrections,
-        refund_context=refund_context,
-    )
-
-    try:
-        content = _call_llm(
-            system_prompt,
-            f'商户名称："{merchant_name}"\n交易金额：{amount}',
-        )
-        result = _extract_json(content)
-
-        if not result:
-            return {"category": None, "subcategory": None, "success": False, "error": "No JSON in response"}
-
-        return {
-            "category_name": result.get("category", ""),
-            "subcategory_name": result.get("subcategory", ""),
-            "success": True,
-        }
-    except Exception as e:
-        return {"category": None, "subcategory": None, "success": False, "error": str(e)}
-
-
-def agent_review(
-    raw_description: str,
-    merchant_name: str,
-    amount: float,
-    category_name: str,
-    subcategory_name: str,
-) -> dict:
-    """Agent 3: Review the categorization and correct if necessary."""
-    category_tree = _build_category_tree()
-
-    system_prompt = REVIEWER_PROMPT.format(
-        raw_description=raw_description,
-        merchant_name=merchant_name,
-        amount=amount,
-        category=category_name or "未分类",
-        subcategory=subcategory_name or "无",
-        category_tree=category_tree,
-    )
-
-    try:
-        content = _call_llm(system_prompt, "请审核以上分类结果。", temperature=0.2)
-        result = _extract_json(content)
-
-        if not result:
-            return {"approved": True}  # Default to approving if we can't parse
-
-        return result
-    except Exception:
-        return {"approved": True}  # Default to approving on error
-
-
-# ──────────────────────────────────────────────
 # Workflow Orchestrator
 # ──────────────────────────────────────────────
 
-def categorize_transaction(description: str, amount: float) -> dict:
+def categorize_transaction(description: str, amount: float, raw_description: str | None = None) -> dict:
     """Classify one transaction with a single Ollama call."""
     category_choices = _build_category_choices()
     corrections = _build_corrections()
-    refund_context = _find_refund_candidates(description, amount)
+    refund_context = _find_refund_candidates(raw_description or description, amount)
     system_prompt = UNIFIED_CLASSIFY_PROMPT.format(
         category_choices=category_choices,
         corrections=corrections,
@@ -462,7 +393,7 @@ def categorize_transaction(description: str, amount: float) -> dict:
     try:
         content = _call_llm(
             system_prompt,
-            f'交易描述："{description}"\n交易金额：{amount}',
+            f'交易描述："{description}"\n原始描述："{raw_description or description}"\n交易金额：{amount}',
             temperature=0,
             num_predict=96,
             json_mode=True,
@@ -488,11 +419,31 @@ def categorize_transaction(description: str, amount: float) -> dict:
             "merchant_name": merchant_name,
         }
 
-    return {
+    final_result = {
+        "id": 0,
         "category_id": parent_id,
         "subcategory_id": sub_id,
         "merchant_name": merchant_name,
+        "classification_confidence": _clean_confidence(result.get("confidence")),
+        "classification_review_status": "not_reviewed",
     }
+    if _should_review(final_result, max(0, min(100, OLLAMA_REVIEW_LOW_CONFIDENCE)), 0):
+        reviewed = review_classification_results(
+            [{
+                "id": 0,
+                "cleaned_description": description,
+                "raw_description": raw_description or description,
+                "amount": amount,
+            }],
+            [final_result],
+            llm_context={"category_choices": category_choices, "corrections": corrections},
+            low_confidence=max(0, min(100, OLLAMA_REVIEW_LOW_CONFIDENCE)),
+            sample_rate=0,
+        )
+        if reviewed:
+            final_result = reviewed[0]
+    final_result.pop("id", None)
+    return final_result
 
 
 def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
@@ -500,8 +451,16 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
     categorized = 0
     failed = 0
     last_error = None
+    batch_size = _clamp_batch_size(OLLAMA_BATCH_SIZE, 32, 1, 80)
+    retry_batch_size = _clamp_batch_size(OLLAMA_RETRY_BATCH_SIZE, 8, 1, 24)
+    low_confidence = max(0, min(100, OLLAMA_REVIEW_LOW_CONFIDENCE))
+    review_sample_rate = _clamp_sample_rate(OLLAMA_REVIEW_SAMPLE_RATE)
+    llm_context = {
+        "category_choices": _build_category_choices(),
+        "corrections": _build_corrections(),
+    }
 
-    def emit_progress(processed: int) -> None:
+    def emit_progress(processed: int, message: str | None = None) -> None:
         if progress_callback:
             progress_callback({
                 "total": total,
@@ -509,6 +468,7 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
                 "categorized": categorized,
                 "failed": failed,
                 "error": last_error,
+                "message": message,
             })
 
     with db_connection() as conn:
@@ -519,30 +479,64 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
             txn_ids,
         ).fetchall()
 
-        for start in range(0, len(rows), 20):
-            chunk = rows[start:start + 20]
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start:start + batch_size]
+            chunk_end = min(start + len(chunk), total)
+            emit_progress(
+                categorized + failed,
+                f"正在调用 LLM 分类 {start + 1}-{chunk_end}/{total}",
+            )
             try:
-                results = categorize_many_with_llm(chunk)
+                results = categorize_many_with_llm(chunk, llm_context=llm_context)
             except Exception as exc:
                 last_error = str(exc)
                 results = []
-            if not results:
-                results = []
+            valid_results, retry_rows = _split_valid_batch_results(chunk, results)
+            if retry_rows:
+                retry_results = []
                 retry_errors = []
-                for txn in chunk:
-                    single = categorize_transaction(
-                        txn["cleaned_description"] or txn["raw_description"],
-                        txn["amount"],
+                for retry_start in range(0, len(retry_rows), retry_batch_size):
+                    retry_chunk = retry_rows[retry_start:retry_start + retry_batch_size]
+                    emit_progress(
+                        categorized + failed,
+                        f"正在用 LLM 修复 {len(retry_chunk)} 条分类结果",
                     )
-                    if single.get("category_id"):
-                        results.append({"id": txn["id"], **single})
-                    else:
-                        retry_errors.append(single.get("error", "Unknown single-item classification error"))
-                if retry_errors:
-                    last_error = retry_errors[-1]
-                else:
-                    last_error = None
-            by_id = {int(r.get("id")): r for r in results if r.get("id") is not None}
+                    try:
+                        retry_results.extend(
+                            categorize_many_with_llm(
+                                retry_chunk,
+                                llm_context=llm_context,
+                                strict=True,
+                            )
+                        )
+                    except Exception as exc:
+                        retry_errors.append(str(exc))
+                retry_valid, _ = _split_valid_batch_results(retry_rows, retry_results)
+                valid_results.extend(retry_valid)
+                last_error = retry_errors[-1] if retry_errors else None
+
+            if valid_results:
+                review_count = sum(
+                    1 for result in valid_results
+                    if _should_review(result, low_confidence, review_sample_rate)
+                )
+                if review_count:
+                    try:
+                        emit_progress(
+                            categorized + failed,
+                            f"正在复核 {review_count} 条低置信/抽样结果",
+                        )
+                        valid_results = review_classification_results(
+                            chunk,
+                            valid_results,
+                            llm_context=llm_context,
+                            low_confidence=low_confidence,
+                            sample_rate=review_sample_rate,
+                        )
+                    except Exception as exc:
+                        last_error = str(exc)
+
+            by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
 
             for txn in chunk:
                 result = by_id.get(txn["id"])
@@ -568,9 +562,23 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
                 merchant = result.get("merchant_name") or txn["cleaned_description"] or txn["raw_description"]
                 conn.execute(
                     """UPDATE transactions
-                       SET category_id = ?, subcategory_id = ?, is_categorized = 1, cleaned_description = ?
+                       SET category_id = ?,
+                           subcategory_id = ?,
+                           is_categorized = 1,
+                           cleaned_description = ?,
+                           classification_confidence = ?,
+                           classification_review_status = ?,
+                           classification_review_reason = ?
                        WHERE id = ?""",
-                    (category_id, subcategory_id, merchant, txn["id"]),
+                    (
+                        category_id,
+                        subcategory_id,
+                        merchant,
+                        _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
+                        result.get("classification_review_status") or "not_reviewed",
+                        result.get("classification_review_reason") or result.get("review_reason"),
+                        txn["id"],
+                    ),
                 )
                 categorized += 1
                 emit_progress(categorized + failed)
@@ -578,18 +586,87 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
     return {"total": total, "categorized": categorized, "failed": failed, "error": last_error}
 
 
-def categorize_many_with_llm(rows) -> list[dict]:
-    category_choices = _build_category_choices()
-    corrections = _build_corrections()
-    items = [
-        {
-            "id": r["id"],
-            "description": r["cleaned_description"] or r["raw_description"],
-            "amount": r["amount"],
-        }
-        for r in rows
-    ]
-    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID。
+def _split_valid_batch_results(rows, results: list[dict]) -> tuple[list[dict], list]:
+    expected_by_id = {int(row["id"]): row for row in rows}
+    valid_results = []
+    seen_ids = set()
+    for result in results or []:
+        try:
+            result_id = int(result.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if result_id not in expected_by_id or result_id in seen_ids:
+            continue
+        category_id, subcategory_id = _valid_category_ids(
+            result.get("category_id"),
+            result.get("subcategory_id"),
+        )
+        if not category_id:
+            category_id, subcategory_id = _resolve_category_ids(
+                result.get("category", ""),
+                result.get("subcategory", ""),
+            )
+        if not category_id:
+            continue
+        next_result = dict(result)
+        next_result["category_id"] = category_id
+        next_result["subcategory_id"] = subcategory_id
+        next_result["classification_confidence"] = _clean_confidence(
+            result.get("classification_confidence", result.get("confidence"))
+        )
+        valid_results.append(next_result)
+        seen_ids.add(result_id)
+    retry_rows = [row for row in rows if int(row["id"]) not in seen_ids]
+    return valid_results, retry_rows
+
+
+def _should_review(result: dict, low_confidence: int, sample_rate: float) -> bool:
+    confidence = _clean_confidence(result.get("classification_confidence", result.get("confidence")))
+    if confidence is None or confidence < low_confidence:
+        return True
+    if sample_rate <= 0:
+        return False
+    try:
+        result_id = int(result.get("id"))
+    except (TypeError, ValueError):
+        return False
+    return (result_id % 100) < int(sample_rate * 100)
+
+
+def review_classification_results(
+    rows,
+    results: list[dict],
+    llm_context: dict | None = None,
+    low_confidence: int = 75,
+    sample_rate: float = 0.1,
+) -> list[dict]:
+    rows_by_id = {int(row["id"]): row for row in rows}
+    results_by_id = {int(result["id"]): dict(result) for result in results if result.get("id") is not None}
+    review_items = []
+    for result in results_by_id.values():
+        if not _should_review(result, low_confidence, sample_rate):
+            result["classification_review_status"] = result.get("classification_review_status") or "not_reviewed"
+            continue
+        row = rows_by_id.get(int(result["id"]))
+        if not row:
+            continue
+        review_items.append({
+            "id": result["id"],
+            "description": row["cleaned_description"] or row["raw_description"],
+            "raw_description": row["raw_description"],
+            "amount": row["amount"],
+            "merchant_name": result.get("merchant_name"),
+            "category_id": result.get("category_id"),
+            "subcategory_id": result.get("subcategory_id"),
+            "confidence": _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
+        })
+
+    if not review_items:
+        return list(results_by_id.values())
+
+    category_choices = (llm_context or {}).get("category_choices") or _build_category_choices()
+    corrections = (llm_context or {}).get("corrections") or _build_corrections()
+    system_prompt = f"""你是一个交易分类复核 agent。请审计候选分类，修正低置信或明显错误的分类。
 
 分类表：
 {category_choices}
@@ -599,17 +676,107 @@ def categorize_many_with_llm(rows) -> list[dict]:
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
-- subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
+- 如果候选分类合理，approved=true，并返回原 category_id/subcategory_id。
+- 如果候选分类不合理，approved=false，并返回修正后的 category_id/subcategory_id。
+- category_id 必须选择一级分类 ID；subcategory_id 必须属于该一级分类，不能编造 ID。
+- confidence 输出复核后的 0-100 整数。
+- reason 用一句很短的中文说明复核判断。
 - 只返回 JSON 对象，不要 Markdown 或解释。
 
 JSON 格式：
-{{"results":[{{"id":1,"merchant_name":"...","category_id":1,"subcategory_id":2}}]}}"""
+{{"results":[{{"id":1,"approved":true,"category_id":1,"subcategory_id":2,"confidence":91,"reason":"候选分类合理"}}]}}"""
+    content = _call_llm(
+        system_prompt,
+        json.dumps(review_items, ensure_ascii=False),
+        temperature=0,
+        num_predict=max(256, min(1536, len(review_items) * 96 + 128)),
+        json_mode=True,
+    )
+    review_results = _extract_json_array(content)
+    if review_results is None:
+        raise ValueError(f"LLM reviewer did not return usable JSON: {_short_response(content)}")
+
+    for review in review_results:
+        try:
+            result_id = int(review.get("id"))
+        except (TypeError, ValueError):
+            continue
+        original = results_by_id.get(result_id)
+        if not original:
+            continue
+        category_id, subcategory_id = _valid_category_ids(
+            review.get("category_id"),
+            review.get("subcategory_id"),
+        )
+        if not category_id:
+            original["classification_review_status"] = "review_invalid"
+            original["classification_review_reason"] = review.get("reason") or "复核结果分类 ID 无效"
+            continue
+        original["category_id"] = category_id
+        original["subcategory_id"] = subcategory_id
+        original["classification_confidence"] = _clean_confidence(review.get("confidence"))
+        original["classification_review_status"] = "review_approved" if review.get("approved") else "review_corrected"
+        original["classification_review_reason"] = review.get("reason")
+
+    reviewed_ids = {
+        int(item["id"])
+        for item in review_items
+        if item.get("id") is not None
+    }
+    for result_id in reviewed_ids:
+        result = results_by_id.get(result_id)
+        if result and not result.get("classification_review_status"):
+            result["classification_review_status"] = "review_missing"
+            result["classification_review_reason"] = "复核未返回该交易"
+
+    return list(results_by_id.values())
+
+
+def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool = False) -> list[dict]:
+    category_choices = (llm_context or {}).get("category_choices") or _build_category_choices()
+    corrections = (llm_context or {}).get("corrections") or _build_corrections()
+    items = [
+        {
+            "id": r["id"],
+            "description": r["cleaned_description"] or r["raw_description"],
+            "amount": r["amount"],
+            **(
+                {"refund_context": refund_context}
+                if (refund_context := _find_refund_candidates(r["raw_description"], r["amount"]))
+                else {}
+            ),
+        }
+        for r in rows
+    ]
+    strict_rules = """
+- 这是修复批次：必须只处理输入里给出的 id，不能遗漏任何一条。
+- 如果上次结果无法确定，请重新用 LLM 判断；不要编造不存在的分类 ID。
+""" if strict else ""
+    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID、置信度。
+
+分类表：
+{category_choices}
+
+用户纠正记录：
+{corrections}
+
+规则：
+- 每个输入 id 必须返回一条结果。
+- merchant_name 要短，只保留清晰的商户/交易对方名称。
+- category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
+- subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
+- 如果输入含 refund_context，优先参考候选原始交易来判断退款分类。
+- confidence 输出 0-100 的整数，表示你对分类的把握，不要为了显得确定而虚高。
+- 只返回 JSON 对象，不要 Markdown 或解释。
+{strict_rules}
+
+JSON 格式：
+{{"results":[{{"id":1,"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}}]}}"""
     content = _call_llm(
         system_prompt,
         json.dumps(items, ensure_ascii=False),
         temperature=0,
-        num_predict=max(256, min(1536, len(items) * 96)),
+        num_predict=max(256, min(2048, len(items) * 80 + 96)),
         json_mode=True,
     )
     results = _extract_json_array(content)

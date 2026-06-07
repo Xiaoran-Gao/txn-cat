@@ -6,7 +6,7 @@ from database import db_connection
 NL_QUERY_SYSTEM_PROMPT = """你是一个SQLite查询助手。根据用户的自然语言问题，生成一个SQLite查询语句。
 
 数据库schema如下：
-- transactions(id, date DATE, raw_description TEXT, cleaned_description TEXT, amount REAL, currency TEXT, category_id INTEGER, subcategory_id INTEGER, source TEXT, is_categorized INTEGER, created_at TIMESTAMP)
+- transactions(id, date DATE, raw_description TEXT, cleaned_description TEXT, amount REAL, currency TEXT, category_id INTEGER, subcategory_id INTEGER, classification_confidence INTEGER, classification_review_status TEXT, classification_review_reason TEXT, source TEXT, is_categorized INTEGER, created_at TIMESTAMP)
 - categories(id, name, parent_id)  -- parent_id IS NULL 表示大类，NOT NULL 表示子类
 - merchant_mappings(id, pattern, display_name, is_regex)
 - correction_examples(id, description, category_id, subcategory_id, created_at)

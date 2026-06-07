@@ -16,6 +16,18 @@ import { ArrowRight, FileSpreadsheet, MessageSquareText, RefreshCw, UploadCloud,
 import { api } from "../api/client";
 import type { ClassificationJob, ImportResult, Transaction } from "../types";
 
+async function fetchAllTransactions() {
+  const perPage = 200;
+  const first = await api.listTransactions({ page: 1, per_page: perPage, sort_by: "date", sort_order: "desc" });
+  const items = [...first.items];
+  const totalPages = Math.ceil(first.total / perPage);
+  for (let page = 2; page <= totalPages; page += 1) {
+    const next = await api.listTransactions({ page, per_page: perPage, sort_by: "date", sort_order: "desc" });
+    items.push(...next.items);
+  }
+  return items;
+}
+
 export default function Dashboard() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [txns, setTxns] = useState<Transaction[]>([]);
@@ -26,8 +38,7 @@ export default function Dashboard() {
   const [error, setError] = useState("");
 
   const refreshTransactions = async () => {
-    const data = await api.listTransactions({ page: 1, per_page: 200, sort_by: "date", sort_order: "desc" });
-    setTxns(data.items);
+    setTxns(await fetchAllTransactions());
   };
 
   useEffect(() => {
@@ -53,14 +64,14 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, [job]);
 
-  const startJob = (jobId: string | null) => {
+  const startJob = (jobId: string | null, total = 0) => {
     if (!jobId) return;
     setCategorizing(true);
     setJob({
       id: jobId,
       source: "upload",
       status: "queued",
-      total: 0,
+      total,
       processed: 0,
       categorized: 0,
       failed: 0,
@@ -79,7 +90,7 @@ export default function Dashboard() {
     try {
       const result: ImportResult = await api.importFile(file);
       setNotice(`导入完成：新增 ${result.imported} 条，跳过重复 ${result.skipped} 条。`);
-      startJob(result.classification_job_id);
+      startJob(result.classification_job_id, result.classification_total);
       if (!result.classification_job_id) await refreshTransactions();
     } catch (err) {
       setError(err instanceof Error ? err.message : "上传失败");
@@ -95,7 +106,7 @@ export default function Dashboard() {
     setNotice("");
     try {
       const result = await api.categorizeAll();
-      if (result.job_id) startJob(result.job_id);
+      if (result.job_id) startJob(result.job_id, result.total);
       else {
         setCategorizing(false);
         setNotice("没有待分类交易。");
@@ -152,10 +163,10 @@ export default function Dashboard() {
   return (
     <div className="home-grid dashboard-workspace">
       <section className="home-metrics">
-        <Metric label="交易笔数" value={String(metrics.count)} delta="local" />
-        <Metric label="本月支出" value={`¥ ${metrics.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="spend" />
-        <Metric label="收入金额" value={`¥ ${metrics.income.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="income" />
-        <Metric label="分类覆盖" value={`${metrics.rate}%`} delta={metrics.uncategorized ? `${metrics.uncategorized} 待确认` : "ready"} />
+        <Metric label="交易笔数" value={String(metrics.count)} delta="全量本地数据" />
+        <Metric label="本月支出" value={`¥ ${metrics.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="真实交易汇总" />
+        <Metric label="收入金额" value={`¥ ${metrics.income.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} delta="真实交易汇总" />
+        <Metric label="分类覆盖" value={`${metrics.rate}%`} delta={metrics.uncategorized ? `${metrics.uncategorized} 待确认` : "全部确认"} />
       </section>
 
       <section className="home-panel next-actions-panel">
@@ -184,37 +195,47 @@ export default function Dashboard() {
 
       <section className="home-panel chart-panel">
         <div className="panel-title"><div><strong>收支趋势</strong><span>基于本地交易</span></div></div>
-        <ResponsiveContainer width="100%" height={246}>
-          <AreaChart data={trend}>
-            <CartesianGrid stroke="#edf2f7" vertical={false} />
-            <XAxis dataKey="month" tickLine={false} axisLine={false} />
-            <YAxis hide />
-            <Tooltip />
-            <Area type="monotone" dataKey="spend" stroke="#1f7aff" fill="#dbeafe" strokeWidth={2.5} />
-            <Area type="monotone" dataKey="income" stroke="#22c55e" fill="#dcfce7" strokeWidth={2.5} />
-          </AreaChart>
-        </ResponsiveContainer>
+        {trend.length ? (
+          <ResponsiveContainer width="100%" height={246}>
+            <AreaChart data={trend}>
+              <CartesianGrid stroke="#edf2f7" vertical={false} />
+              <XAxis dataKey="month" tickLine={false} axisLine={false} />
+              <YAxis hide />
+              <Tooltip />
+              <Area type="monotone" dataKey="spend" stroke="#1f7aff" fill="#dbeafe" strokeWidth={2.5} />
+              <Area type="monotone" dataKey="income" stroke="#22c55e" fill="#dcfce7" strokeWidth={2.5} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="empty-chart-state">暂无收支趋势数据</div>
+        )}
       </section>
 
       <section className="home-panel pie-panel">
         <div className="panel-title"><div><strong>分类结构</strong><span>支出占比</span></div></div>
         <div className="pie-wrap">
-          <ResponsiveContainer width="45%" height={220}>
-            <PieChart>
-              <Pie data={categoryPie} dataKey="value" innerRadius={52} outerRadius={82} paddingAngle={3}>
-                {categoryPie.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
-              </Pie>
-            </PieChart>
-          </ResponsiveContainer>
-          <div className="pie-legend">
-            {categoryPie.map((item) => (
-              <div key={item.name}>
-                <span style={{ background: item.color }} />
-                <strong>{item.name}</strong>
-                <em>{item.value.toFixed(item.value > 100 ? 0 : 1)}</em>
+          {categoryPie.length ? (
+            <>
+              <ResponsiveContainer width="45%" height={220}>
+                <PieChart>
+                  <Pie data={categoryPie} dataKey="value" innerRadius={52} outerRadius={82} paddingAngle={3}>
+                    {categoryPie.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="pie-legend">
+                {categoryPie.map((item) => (
+                  <div key={item.name}>
+                    <span style={{ background: item.color }} />
+                    <strong>{item.name}</strong>
+                    <em>{item.value.toFixed(item.value > 100 ? 0 : 1)}</em>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          ) : (
+            <div className="empty-chart-state">暂无支出分类数据</div>
+          )}
         </div>
       </section>
 
@@ -247,7 +268,9 @@ function ProgressBar({ job, progress }: { job: ClassificationJob; progress: numb
         <strong>{job.message}</strong>
         <span>{job.processed}/{job.total} · 成功 {job.categorized} · 失败 {job.failed}</span>
       </div>
-      <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+      <div className={`progress-track ${job.status === "running" && job.processed < job.total ? "active" : ""}`}>
+        <span style={{ width: `${progress}%` }} />
+      </div>
     </div>
   );
 }

@@ -674,6 +674,27 @@ a {
   transition: width 240ms ease;
 }
 
+.progress-track.active {
+  position: relative;
+}
+
+.progress-track.active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(31, 122, 255, 0.26), transparent);
+  animation: progress-sweep 1.15s linear infinite;
+}
+
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
 .home-metrics {
   display: grid;
   grid-column: 1 / -1;
@@ -982,6 +1003,23 @@ a {
   font-size: 14px;
 }
 
+.classification-banner-body {
+  display: grid;
+  gap: 8px;
+  flex: 1;
+}
+
+.classification-banner-body > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.classification-banner-body .progress-track {
+  width: 100%;
+}
+
 .ghost-link {
   margin-left: auto;
   color: var(--blue);
@@ -1276,6 +1314,19 @@ tbody tr:hover,
   padding: 44px;
   color: var(--soft);
   text-align: center;
+}
+
+.empty-chart-state {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  width: 100%;
+  color: var(--soft);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .table-footer {
