@@ -71,8 +71,10 @@ The system processes uploads through a three-phase pipeline:
 **Phase C — Local LLM Categorization**:
 - Runs automatically for newly imported transactions after dedupe.
 - Uses Ollama locally; there is no rule-based category fallback.
-- Batches multiple transactions in a single prompt to reduce slow local-model round trips.
-- For each transaction, the LLM returns `{display_description, category, subcategory}`.
+- Before calling Ollama, groups pending transactions by deterministic `display_description` (the pre-cleaned Display Merchant) plus amount direction (`positive` / `negative` / `zero`). Only one representative transaction per group is sent to the LLM.
+- Batches the distinct representative transactions in a single prompt to reduce slow local-model round trips.
+- For each representative transaction, the LLM returns `{display_description, category, subcategory}`; valid results are copied back to all transactions in that group.
+- Manual `display_description` edits are preserved when group classification results are applied.
 - Uses the editable category tree and recent user corrections as prompt context.
 - If a category/subcategory cannot be resolved or Ollama fails, the transaction remains uncategorized for manual review.
 
@@ -260,7 +262,7 @@ Input payload:
 
 ### Batch Transaction Categorization
 
-Used after import for newly inserted rows, and for manual recategorization batches. The model classifies a chunk of transactions in one call and returns IDs plus an LLM self-rated confidence score. There is no rule-based category fallback; unparseable or invalid LLM outputs remain uncategorized or are retried through LLM only.
+Used after import for newly inserted rows, and for manual recategorization batches. Before each batch, pending transactions are reduced to distinct representative rows grouped by pre-cleaned `display_description` plus amount direction, so repeated merchants/descriptions are classified once and then applied back to all matching transactions. Positive, negative, and zero-amount rows remain separate groups so refunds/income are not mixed with spending. The model classifies a chunk of representative transactions in one call and returns IDs plus an LLM self-rated confidence score. There is no rule-based category fallback; unparseable or invalid LLM outputs remain uncategorized or are retried through LLM only.
 
 ```
 你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID、置信度。
@@ -427,6 +429,6 @@ TxnCatAI/
 4. **Two Descriptions Stored**: `raw_description` (original) and `display_description` (human-readable). Both visible in UI.
 5. **NL Query Safety**: Read-only SQL generation only. LLM prompt enforces SELECT-only.
 6. **No Auth**: Local single-user tool.
-7. **LLM-Only Categorization With Selective Review**: The main path is one batched LLM classifier for speed. Low-confidence results and a deterministic sample of high-confidence results go through a second LLM reviewer agent. Avoid fixed sequential multi-agent classification for every transaction because it multiplies local Ollama latency.
+7. **LLM-Only Categorization With Grouped Representatives and Selective Review**: The main path groups transactions by pre-cleaned `display_description` plus amount direction, classifies one representative per group in batched LLM calls, and applies valid results back to all rows in the group. Low-confidence results and a deterministic sample of high-confidence representative results go through a second LLM reviewer agent. Avoid fixed sequential multi-agent classification for every transaction because it multiplies local Ollama latency.
 8. **Refund Matching**: Refunds (negative amounts or descriptions with 退款/退货) are matched to candidate original transactions by amount similarity (±2% tolerance). Candidate transactions are included in the LLM prompt as context so the refund inherits the same category. Supports partial refunds (broader search by recency when exact amount doesn't match).
 9. **No Synthetic Analytics Data**: Dashboards, charts, confidence values, trends, and insight cards must be computed from persisted local data or explicit LLM outputs. Empty states are shown when no real data exists; do not display demo transactions, fake percentages, placeholder chart series, or fabricated confidence scores.

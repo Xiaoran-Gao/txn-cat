@@ -484,6 +484,9 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
                 "message": message,
             })
 
+    if not txn_ids:
+        return {"total": 0, "categorized": 0, "failed": 0, "error": None}
+
     with db_connection() as conn:
         rows = conn.execute(
             """SELECT id, display_description, display_description_source, raw_description, amount
@@ -492,12 +495,15 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
             txn_ids,
         ).fetchall()
 
-    for start in range(0, len(rows), batch_size):
-        chunk = rows[start:start + batch_size]
-        chunk_end = min(start + len(chunk), total)
+    groups = _group_rows_for_classification(rows)
+    representative_rows = [group["representative"] for group in groups]
+
+    for start in range(0, len(representative_rows), batch_size):
+        chunk = representative_rows[start:start + batch_size]
+        chunk_group_count = len(chunk)
         emit_progress(
             categorized + failed,
-            f"正在调用 LLM 分类 {start + 1}-{chunk_end}/{total}",
+            f"正在调用 LLM 分类 {start + 1}-{start + chunk_group_count}/{len(representative_rows)} 个去重商户",
         )
         try:
             results = categorize_many_with_llm(chunk, llm_context=llm_context)
@@ -552,10 +558,13 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
         by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
 
         updates = []
-        for txn in chunk:
+        chunk_groups = groups[start:start + chunk_group_count]
+        for index, txn in enumerate(chunk):
             result = by_id.get(txn["id"])
+            group = chunk_groups[index]
+            group_rows = group["rows"]
             if not result:
-                failed += 1
+                failed += len(group_rows)
                 emit_progress(categorized + failed)
                 continue
 
@@ -569,26 +578,34 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
                     result.get("subcategory", ""),
                 )
             if not category_id:
-                failed += 1
+                failed += len(group_rows)
                 emit_progress(categorized + failed)
                 continue
 
-            display_description = (
-                txn["display_description"]
-                if txn["display_description_source"] == "manual"
-                else result.get("display_description")
-            )
-            display_description_source = txn["display_description_source"] if txn["display_description_source"] == "manual" else "llm"
-            updates.append((
-                category_id,
-                subcategory_id,
-                display_description,
-                display_description_source,
-                _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
-                result.get("classification_review_status") or "not_reviewed",
-                result.get("classification_review_reason") or result.get("review_reason"),
-                txn["id"],
-            ))
+            confidence = _clean_confidence(result.get("classification_confidence", result.get("confidence")))
+            review_status = result.get("classification_review_status") or "not_reviewed"
+            review_reason = result.get("classification_review_reason") or result.get("review_reason")
+            for group_txn in group_rows:
+                display_description = (
+                    group_txn["display_description"]
+                    if group_txn["display_description_source"] == "manual"
+                    else result.get("display_description")
+                )
+                display_description_source = (
+                    group_txn["display_description_source"]
+                    if group_txn["display_description_source"] == "manual"
+                    else "llm"
+                )
+                updates.append((
+                    category_id,
+                    subcategory_id,
+                    display_description,
+                    display_description_source,
+                    confidence,
+                    review_status,
+                    review_reason,
+                    group_txn["id"],
+                ))
 
         if updates:
             with db_connection() as conn:
@@ -609,6 +626,29 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
             emit_progress(categorized + failed)
 
     return {"total": total, "categorized": categorized, "failed": failed, "error": last_error}
+
+
+def _amount_direction(amount) -> str:
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        value = 0
+    if value < 0:
+        return "negative"
+    if value > 0:
+        return "positive"
+    return "zero"
+
+
+def _group_rows_for_classification(rows) -> list[dict]:
+    grouped: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        description = (row["display_description"] or row["raw_description"] or "").strip()
+        key = (description, _amount_direction(row["amount"]))
+        if key not in grouped:
+            grouped[key] = {"representative": row, "rows": []}
+        grouped[key]["rows"].append(row)
+    return list(grouped.values())
 
 
 def _split_valid_batch_results(rows, results: list[dict]) -> tuple[list[dict], list]:
