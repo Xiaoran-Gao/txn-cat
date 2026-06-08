@@ -2,7 +2,8 @@ export interface Transaction {
   id: number;
   date: string;
   raw_description: string;
-  cleaned_description: string;
+  display_description: string;
+  display_description_source: string | null;
   amount: number;
   currency: string;
   account_name: string | null;
@@ -22,6 +23,7 @@ export interface Transaction {
 export interface TransactionUpdateInput {
   date?: string;
   raw_description?: string;
+  display_description?: string;
   amount?: number;
   account_name?: string | null;
   payment_channel?: string | null;
@@ -90,11 +92,4 @@ export interface NLQueryResult {
   answer: string;
   sql: string;
   data: Record<string, string | number | boolean | null>[] | null;
-}
-
-export interface MerchantMapping {
-  id: number;
-  pattern: string;
-  display_name: string;
-  is_regex: number;
 }

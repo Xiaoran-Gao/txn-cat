@@ -1,10 +1,9 @@
 import re
-from database import db_connection
 
 
 # Common noise patterns in Chinese bank transaction descriptions.
 # These are purely mechanical removals — no semantic replacement.
-# The LLM Normalizer agent handles intelligent merchant name extraction downstream.
+# The LLM classifier handles semantic display-description generation downstream.
 NOISE_PATTERNS = [
     r"\d{8,}",                        # long digit sequences (transaction IDs, ref numbers)
     r"\d{4}-\d{2}-\d{2}",            # dates
@@ -22,19 +21,6 @@ NOISE_PATTERNS = [
     r"（消费）",                        # （消费）
     r"\s+",                           # collapse whitespace
 ]
-
-
-def load_mappings() -> list[dict]:
-    """Load merchant mappings for display-name hints.
-    Note: these are no longer used for destructive text replacement.
-    Kept for reference / future use in non-destructive tagging."""
-    with db_connection() as conn:
-        return [
-            dict(row)
-            for row in conn.execute(
-                "SELECT id, pattern, display_name, is_regex FROM merchant_mappings ORDER BY id"
-            ).fetchall()
-        ]
 
 
 def normalize_description(raw: str) -> str:

@@ -2,7 +2,6 @@ from fastapi import APIRouter
 from database import db_connection
 from services.categorizer import check_ollama
 from config import OLLAMA_MODEL
-from models import MerchantMappingCreate
 
 router = APIRouter()
 
@@ -53,34 +52,3 @@ def list_models():
             "error": f"Configured model '{OLLAMA_MODEL}' is not installed; using '{active_model}'",
         }
     return {"models": models, "active_model": active_model}
-
-
-# Merchant mappings
-@router.get("/merchants")
-def list_merchants():
-    with db_connection() as conn:
-        rows = conn.execute(
-            "SELECT id, pattern, display_name, is_regex FROM merchant_mappings ORDER BY id"
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-@router.post("/merchants")
-def create_merchant(m: MerchantMappingCreate):
-    with db_connection() as conn:
-        try:
-            cur = conn.execute(
-                "INSERT INTO merchant_mappings (pattern, display_name, is_regex) VALUES (?, ?, ?)",
-                (m.pattern, m.display_name, 1 if m.is_regex else 0),
-            )
-            return {"id": cur.lastrowid}
-        except Exception:
-            from fastapi import HTTPException
-            raise HTTPException(400, "Mapping already exists")
-
-
-@router.delete("/merchants/{mapping_id}")
-def delete_merchant(mapping_id: int):
-    with db_connection() as conn:
-        conn.execute("DELETE FROM merchant_mappings WHERE id = ?", (mapping_id,))
-    return {"status": "ok"}

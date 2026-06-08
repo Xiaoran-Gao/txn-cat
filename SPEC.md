@@ -2,7 +2,7 @@
 
 ## Overview
 
-A local-first web application for a monthly personal finance ritual: manually upload the latest bank, Alipay, WeChat, or card statement as Excel/CSV, let the system parse and deduplicate transactions, clean merchant descriptions, categorize spending with a local LLM (Ollama 8B), then review a monthly dashboard and ask questions in Chinese. Single-user, privacy-preserving — all transaction data, SQLite storage, and AI processing stays on the machine. Primary language: Chinese (transactions and UI).
+A local-first web application for a monthly personal finance ritual: manually upload the latest bank, Alipay, WeChat, or card statement as Excel/CSV, let the system parse and deduplicate transactions, generate readable display descriptions, categorize spending with a local LLM (Ollama 8B), then review a monthly dashboard and ask questions in Chinese. Single-user, privacy-preserving — all transaction data, SQLite storage, and AI processing stays on the machine. Primary language: Chinese (transactions and UI).
 
 The product should feel upload-first, not report-first. The home screen is the starting point for the month: a clear bill upload entry, local privacy status, import progress/results, and the fastest path into classification, spending trends, and natural-language questions.
 
@@ -22,7 +22,7 @@ The product should feel upload-first, not report-first. The home screen is the s
 - **Transactions**: Detailed transaction table for filtering, correction, recategorization, and manual edits.
 - **AI Query**: Conversational analysis for spending questions and drill-downs.
 - **Categories**: Category tree management.
-- **Settings**: Local model, database, and merchant mapping controls.
+- **Settings**: Local model and database status.
 
 ---
 
@@ -66,13 +66,13 @@ The system processes uploads through a three-phase pipeline:
 - Runs automatically on import and manual entry. Fast, deterministic, no LLM call.
 - Strips mechanical noise via regex: transaction IDs, reference numbers, dates, redundant suffixes ("消费", "快捷支付").
 - Does NOT do semantic replacement (that's the LLM's job).
-- Stores both `raw_description` (original) and `cleaned_description` (pre-cleaned).
+- Stores both `raw_description` (original) and `display_description` (human-readable display text). The initial value comes from deterministic pre-cleaning.
 
 **Phase C — Local LLM Categorization**:
 - Runs automatically for newly imported transactions after dedupe.
 - Uses Ollama locally; there is no rule-based category fallback.
 - Batches multiple transactions in a single prompt to reduce slow local-model round trips.
-- For each transaction, the LLM returns `{merchant_name, category, subcategory}`.
+- For each transaction, the LLM returns `{display_description, category, subcategory}`.
 - Uses the editable category tree and recent user corrections as prompt context.
 - If a category/subcategory cannot be resolved or Ollama fails, the transaction remains uncategorized for manual review.
 
@@ -89,13 +89,9 @@ The system processes uploads through a three-phase pipeline:
   - 收入 (工资, 兼职, 退款, 理财收益)
   - 其他 (其他)
 
-**Merchant Mappings** (user-maintainable):
-- A reference table for known merchant patterns. Configurable in Settings.
-- Used as hints/reference, not for destructive text replacement.
-
 #### 3. User Corrections & Learning
 - **Re-categorize**: Click any transaction to change its category/subcategory.
-- **Correction Memory**: Corrected (description, category, subcategory) pairs are stored. The most recent N (default 20) are included as few-shot examples in subsequent LLM prompts.
+- **Correction Memory**: Corrected (raw description, display description, category, subcategory) examples are stored. The most recent N (default 20) are included as few-shot examples in subsequent LLM prompts.
 - **Correction Management**: View and clear stored corrections in Settings.
 
 #### 4. Transaction Management
@@ -165,7 +161,8 @@ CREATE TABLE transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date DATE NOT NULL,
     raw_description TEXT NOT NULL,       -- original description from bank
-    cleaned_description TEXT NOT NULL,   -- after merchant normalization
+    display_description TEXT NOT NULL,   -- LLM/rule-cleaned human-readable transaction text
+    display_description_source TEXT DEFAULT 'rule', -- rule | llm | manual
     amount REAL NOT NULL,
     currency TEXT DEFAULT 'CNY',
     account_name TEXT,                  -- parsed account/card/wallet label when available
@@ -180,16 +177,10 @@ CREATE TABLE transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE merchant_mappings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern TEXT NOT NULL UNIQUE,        -- raw pattern to match (e.g., "MEITUAN")
-    display_name TEXT NOT NULL,          -- normalized name (e.g., "美团")
-    is_regex INTEGER DEFAULT 0          -- 0 = simple contains match, 1 = regex
-);
-
 CREATE TABLE correction_examples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    description TEXT NOT NULL,
+    raw_description TEXT NOT NULL,
+    display_description TEXT NOT NULL,
     category_id INTEGER NOT NULL REFERENCES categories(id),
     subcategory_id INTEGER REFERENCES categories(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -237,13 +228,6 @@ GET    /api/analysis/monthly-spend        - Monthly totals for chart (query: mon
 POST   /api/query                         - NL query, returns {answer, sql, data}
 ```
 
-### Merchant Mappings
-```
-GET    /api/merchants                     - List all merchant mappings
-POST   /api/merchants                     - Add mapping
-DELETE /api/merchants/:id                 - Delete mapping
-```
-
 ### System
 ```
 GET    /api/system/health                 - Health check (DB + Ollama)
@@ -289,7 +273,10 @@ Used after import for newly inserted rows, and for manual recategorization batch
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- merchant_name 要短，只保留清晰的商户/交易对方名称。
+- display_description 要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
+- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
+- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
+- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
 - category_id 必须选择一级分类 ID，不能使用二级分类 ID。
 - subcategory_id 必须属于该一级分类；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
 - confidence 输出 0-100 的整数，表示模型对分类的把握，不是统计学概率。
@@ -297,7 +284,7 @@ Used after import for newly inserted rows, and for manual recategorization batch
 - 只返回 JSON 对象，不要 Markdown 或解释。
 
 JSON 格式：
-{"results":[{"id":1,"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}]}
+{"results":[{"id":1,"display_description":"...","category_id":1,"subcategory_id":2,"confidence":88}]}
 ```
 
 ### Low-Confidence / Sample Review Agent
@@ -307,7 +294,7 @@ After the batch classifier returns valid IDs, a second LLM reviewer pass is used
 - low-confidence items below `OLLAMA_REVIEW_LOW_CONFIDENCE` (default 80)
 - deterministic sampled high-confidence items controlled by `OLLAMA_REVIEW_SAMPLE_RATE` (default 0.10)
 
-The reviewer does not use deterministic classification rules. It receives the candidate classification, category ID table, correction examples, raw/cleaned descriptions, amount, and confidence. It must return a valid category/subcategory ID pair or the original candidate is retained with a review status.
+The reviewer does not use deterministic classification rules. It receives the candidate classification, category ID table, correction examples, raw/display descriptions, amount, and confidence. It must return a valid category/subcategory ID pair or the original candidate is retained with a review status.
 
 Operational defaults prioritize local Ollama stability over maximum chunk size: `OLLAMA_BATCH_SIZE=16`, `OLLAMA_RETRY_BATCH_SIZE=8`, and `OLLAMA_MAX_RETRIES=3`. If Ollama returns 503 during classification, reduce batch size or review sample rate before increasing concurrency.
 
@@ -334,7 +321,8 @@ CREATE TABLE transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date DATE NOT NULL,
     raw_description TEXT NOT NULL,
-    cleaned_description TEXT NOT NULL,
+    display_description TEXT NOT NULL,
+    display_description_source TEXT DEFAULT 'rule',
     amount REAL NOT NULL,
     category_id INTEGER,
     subcategory_id INTEGER,
@@ -370,7 +358,7 @@ CREATE TABLE categories (
 ### Page: 交易记录 (Transactions)
 - Top bar: Import Excel/CSV, Add Transaction, search, date range filter
 - Filter chips: category, categorization status
-- Table: date, description (raw → cleaned), amount, category > subcategory, actions
+- Table: date, description (display + raw), amount, category > subcategory, actions
 - Batch bar on selection
 - Pagination
 
@@ -386,7 +374,6 @@ CREATE TABLE categories (
 
 ### Page: 设置 (Settings)
 - Ollama config (URL, model, test connection)
-- Merchant mappings table
 - Correction examples table
 - Data management (export, clear all)
 
@@ -410,10 +397,10 @@ TxnCatAI/
 │   ├── services/
 │   │   ├── categorizer.py    # LLM categorization
 │   │   ├── parser.py         # Excel/CSV parsing + column detection
-│   │   ├── normalizer.py     # Merchant description normalization
+│   │   ├── normalizer.py     # Mechanical description pre-cleaning
 │   │   ├── analysis.py       # Trend, anomaly, summary
 │   │   └── nl_query.py       # NL-to-SQL service
-│   └── seed_data.py          # Default categories + merchant mappings
+│   └── seed_data.py          # Default categories
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx
@@ -436,8 +423,8 @@ TxnCatAI/
 
 1. **Excel First**: Primary input format is .xlsx/.xls (Chinese banks typically export Excel). CSV as secondary.
 2. **Chinese by Default**: UI, prompts, and category tree default to Chinese. Configurable to English.
-3. **Merchant Normalization in Pipeline**: Happens on import before categorization, not as a separate step.
-4. **Two Descriptions Stored**: `raw_description` (original) and `cleaned_description` (normalized). Both visible in UI.
+3. **Display Description in Pipeline**: Deterministic pre-cleaning creates an initial display description on import; LLM categorization replaces it with a more readable `display_description` unless the user manually edited it.
+4. **Two Descriptions Stored**: `raw_description` (original) and `display_description` (human-readable). Both visible in UI.
 5. **NL Query Safety**: Read-only SQL generation only. LLM prompt enforces SELECT-only.
 6. **No Auth**: Local single-user tool.
 7. **LLM-Only Categorization With Selective Review**: The main path is one batched LLM classifier for speed. Low-confidence results and a deterministic sample of high-confidence results go through a second LLM reviewer agent. Avoid fixed sequential multi-agent classification for every transaction because it multiplies local Ollama latency.

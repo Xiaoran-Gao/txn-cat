@@ -31,6 +31,7 @@ class TransactionCreate(BaseModel):
 class TransactionUpdate(BaseModel):
     date: Optional[date] = None
     raw_description: Optional[str] = None
+    display_description: Optional[str] = None
     amount: Optional[float] = None
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
@@ -42,7 +43,8 @@ class TransactionOut(BaseModel):
     id: int
     date: date
     raw_description: str
-    cleaned_description: str
+    display_description: str
+    display_description_source: Optional[str] = None
     amount: float
     currency: str
     account_name: Optional[str] = None
@@ -105,19 +107,6 @@ class ClassificationJobOut(BaseModel):
     error: Optional[str] = None
     created_at: str
     updated_at: str
-
-
-class MerchantMappingCreate(BaseModel):
-    pattern: str
-    display_name: str
-    is_regex: bool = False
-
-
-class MerchantMappingOut(BaseModel):
-    id: int
-    pattern: str
-    display_name: str
-    is_regex: bool
 
 
 class NLQueryRequest(BaseModel):

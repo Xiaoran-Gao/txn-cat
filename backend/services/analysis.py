@@ -174,7 +174,7 @@ def get_anomalies(month: str) -> list[dict]:
 
         for sc in subcats:
             txn_rows = conn.execute(
-                """SELECT id, cleaned_description, amount
+                """SELECT id, display_description, amount
                    FROM transactions
                    WHERE subcategory_id = ? AND amount > 0
                      AND date >= date('now', '-6 months')""",
@@ -196,9 +196,9 @@ def get_anomalies(month: str) -> list[dict]:
                         "type": "unusual_transaction",
                         "category_name": sc["name"],
                         "transaction_id": r["id"],
-                        "description": r["cleaned_description"],
+                        "description": r["display_description"],
                         "amount": round(r["amount"], 2),
-                        "detail": f'交易"{r["cleaned_description"]}"金额 {r["amount"]:.2f} 在"{sc["name"]}"中异常偏高',
+                        "detail": f'交易"{r["display_description"]}"金额 {r["amount"]:.2f} 在"{sc["name"]}"中异常偏高',
                     })
 
     return anomalies[:20]

@@ -5,6 +5,7 @@ import urllib.request
 from urllib.error import HTTPError, URLError
 import ollama
 from functools import lru_cache
+from threading import Lock
 from config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
@@ -18,7 +19,9 @@ from config import (
 )
 from database import db_connection
 
-UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述和金额，完成商户名提取和交易分类。
+_OLLAMA_CALL_LOCK = Lock()
+
+UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述和金额，生成适合账本展示的交易描述并完成交易分类。
 
 分类表：
 {category_choices}
@@ -28,7 +31,10 @@ UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据
 {refund_context}
 
 规则：
-- merchant_name 输出清晰的商户/交易对方名称，不要解释。
+- display_description 输出清洗后的交易描述，不要解释。它要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
+- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
+- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
+- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
 - subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
 - 金额小于 0 通常表示收入或退款，请结合描述判断。
@@ -36,7 +42,7 @@ UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据
 - 只返回 JSON，不要输出 Markdown 或解释。
 
 JSON 格式：
-{{"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}}"""
+{{"display_description":"...","category_id":1,"subcategory_id":2,"confidence":88}}"""
 
 
 # ──────────────────────────────────────────────
@@ -73,21 +79,22 @@ def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.1, nu
         method="POST",
     )
     attempts = max(1, OLLAMA_MAX_RETRIES)
-    for attempt in range(attempts):
-        try:
-            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
-                response = json.loads(res.read().decode("utf-8"))
-            return response["message"]["content"].strip()
-        except HTTPError as exc:
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
-                detail = exc.read().decode("utf-8", errors="ignore").strip()
-                detail_text = f": {detail}" if detail else ""
-                raise RuntimeError(f"Ollama HTTP {exc.code}{detail_text}") from exc
-            time.sleep(1.5 * (attempt + 1))
-        except URLError as exc:
-            if attempt == attempts - 1:
-                raise RuntimeError(f"Ollama connection failed: {exc.reason}") from exc
-            time.sleep(1.5 * (attempt + 1))
+    with _OLLAMA_CALL_LOCK:
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
+                    response = json.loads(res.read().decode("utf-8"))
+                return response["message"]["content"].strip()
+            except HTTPError as exc:
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
+                    detail = exc.read().decode("utf-8", errors="ignore").strip()
+                    detail_text = f": {detail}" if detail else ""
+                    raise RuntimeError(f"Ollama HTTP {exc.code}{detail_text}") from exc
+                time.sleep(min(30, 3 * (attempt + 1)))
+            except URLError as exc:
+                if attempt == attempts - 1:
+                    raise RuntimeError(f"Ollama connection failed: {exc.reason}") from exc
+                time.sleep(min(30, 3 * (attempt + 1)))
 
     raise RuntimeError("Ollama request failed after retries")
 
@@ -262,7 +269,7 @@ def _valid_category_ids(category_id, subcategory_id) -> tuple[int | None, int | 
 def _build_corrections() -> str:
     with db_connection() as conn:
         examples = conn.execute(
-            """SELECT ce.description, c1.name as cat_name, c2.name as sub_name
+            """SELECT ce.raw_description, ce.display_description, c1.name as cat_name, c2.name as sub_name
                FROM correction_examples ce
                JOIN categories c1 ON ce.category_id = c1.id
                LEFT JOIN categories c2 ON ce.subcategory_id = c2.id
@@ -275,7 +282,7 @@ def _build_corrections() -> str:
         lines = []
         for ex in examples:
             sub = ex["sub_name"] or "无"
-            lines.append(f'- "{ex["description"]}" → {ex["cat_name"]} > {sub}')
+            lines.append(f'- 原始"{ex["raw_description"]}" → 展示"{ex["display_description"]}" → {ex["cat_name"]} > {sub}')
         return "\n".join(lines)
 
 
@@ -335,7 +342,7 @@ def _find_refund_candidates(description: str, amount: float) -> str:
 
     with db_connection() as conn:
         candidates = conn.execute(
-            """SELECT cleaned_description, amount, c1.name as cat_name, c2.name as sub_name
+            """SELECT display_description, amount, c1.name as cat_name, c2.name as sub_name
                FROM transactions t
                LEFT JOIN categories c1 ON t.category_id = c1.id
                LEFT JOIN categories c2 ON t.subcategory_id = c2.id
@@ -353,7 +360,7 @@ def _find_refund_candidates(description: str, amount: float) -> str:
 
         if not candidates:
             candidates = conn.execute(
-                """SELECT cleaned_description, amount, c1.name as cat_name, c2.name as sub_name
+                """SELECT display_description, amount, c1.name as cat_name, c2.name as sub_name
                    FROM transactions t
                    LEFT JOIN categories c1 ON t.category_id = c1.id
                    LEFT JOIN categories c2 ON t.subcategory_id = c2.id
@@ -371,7 +378,7 @@ def _find_refund_candidates(description: str, amount: float) -> str:
         lines = ["该交易疑似为退款。以下是近期可能对应的原始交易（请根据金额和描述推断分类）："]
         for c in candidates:
             sub = f" > {c['sub_name']}" if c["sub_name"] else ""
-            lines.append(f'- "{c["cleaned_description"]}" ¥{c["amount"]:.2f} → {c["cat_name"]}{sub}')
+            lines.append(f'- "{c["display_description"]}" ¥{c["amount"]:.2f} → {c["cat_name"]}{sub}')
         return "\n".join(lines)
 
 
@@ -404,7 +411,13 @@ def categorize_transaction(description: str, amount: float, raw_description: str
     except Exception as e:
         return {"category_id": None, "subcategory_id": None, "error": str(e)}
 
-    merchant_name = result.get("merchant_name") or description
+    display_description = (result.get("display_description") or "").strip()
+    if not display_description:
+        return {
+            "category_id": None,
+            "subcategory_id": None,
+            "error": f"LLM response missing display_description: {result}",
+        }
     parent_id, sub_id = _valid_category_ids(result.get("category_id"), result.get("subcategory_id"))
     if parent_id is None:
         category_name = result.get("category", "")
@@ -416,14 +429,14 @@ def categorize_transaction(description: str, amount: float, raw_description: str
             "category_id": None,
             "subcategory_id": None,
             "error": f"Category not found in LLM response: {result}",
-            "merchant_name": merchant_name,
+            "display_description": display_description,
         }
 
     final_result = {
         "id": 0,
         "category_id": parent_id,
         "subcategory_id": sub_id,
-        "merchant_name": merchant_name,
+        "display_description": display_description,
         "classification_confidence": _clean_confidence(result.get("confidence")),
         "classification_review_status": "not_reviewed",
     }
@@ -431,7 +444,7 @@ def categorize_transaction(description: str, amount: float, raw_description: str
         reviewed = review_classification_results(
             [{
                 "id": 0,
-                "cleaned_description": description,
+                "display_description": description,
                 "raw_description": raw_description or description,
                 "amount": amount,
             }],
@@ -473,115 +486,127 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
 
     with db_connection() as conn:
         rows = conn.execute(
-            """SELECT id, cleaned_description, raw_description, amount
+            """SELECT id, display_description, display_description_source, raw_description, amount
                FROM transactions
                WHERE id IN ({})""".format(",".join("?" for _ in txn_ids)),
             txn_ids,
         ).fetchall()
 
-        for start in range(0, len(rows), batch_size):
-            chunk = rows[start:start + batch_size]
-            chunk_end = min(start + len(chunk), total)
-            emit_progress(
-                categorized + failed,
-                f"正在调用 LLM 分类 {start + 1}-{chunk_end}/{total}",
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start:start + batch_size]
+        chunk_end = min(start + len(chunk), total)
+        emit_progress(
+            categorized + failed,
+            f"正在调用 LLM 分类 {start + 1}-{chunk_end}/{total}",
+        )
+        try:
+            results = categorize_many_with_llm(chunk, llm_context=llm_context)
+        except Exception as exc:
+            last_error = str(exc)
+            results = []
+        valid_results, retry_rows = _split_valid_batch_results(chunk, results)
+        if retry_rows:
+            retry_results = []
+            retry_errors = []
+            for retry_start in range(0, len(retry_rows), retry_batch_size):
+                retry_chunk = retry_rows[retry_start:retry_start + retry_batch_size]
+                emit_progress(
+                    categorized + failed,
+                    f"正在用 LLM 修复 {len(retry_chunk)} 条分类结果",
+                )
+                try:
+                    retry_results.extend(
+                        categorize_many_with_llm(
+                            retry_chunk,
+                            llm_context=llm_context,
+                            strict=True,
+                        )
+                    )
+                except Exception as exc:
+                    retry_errors.append(str(exc))
+            retry_valid, _ = _split_valid_batch_results(retry_rows, retry_results)
+            valid_results.extend(retry_valid)
+            last_error = retry_errors[-1] if retry_errors else None
+
+        if valid_results:
+            review_count = sum(
+                1 for result in valid_results
+                if _should_review(result, low_confidence, review_sample_rate)
             )
-            try:
-                results = categorize_many_with_llm(chunk, llm_context=llm_context)
-            except Exception as exc:
-                last_error = str(exc)
-                results = []
-            valid_results, retry_rows = _split_valid_batch_results(chunk, results)
-            if retry_rows:
-                retry_results = []
-                retry_errors = []
-                for retry_start in range(0, len(retry_rows), retry_batch_size):
-                    retry_chunk = retry_rows[retry_start:retry_start + retry_batch_size]
+            if review_count:
+                try:
                     emit_progress(
                         categorized + failed,
-                        f"正在用 LLM 修复 {len(retry_chunk)} 条分类结果",
+                        f"正在复核 {review_count} 条低置信/抽样结果",
                     )
-                    try:
-                        retry_results.extend(
-                            categorize_many_with_llm(
-                                retry_chunk,
-                                llm_context=llm_context,
-                                strict=True,
-                            )
-                        )
-                    except Exception as exc:
-                        retry_errors.append(str(exc))
-                retry_valid, _ = _split_valid_batch_results(retry_rows, retry_results)
-                valid_results.extend(retry_valid)
-                last_error = retry_errors[-1] if retry_errors else None
-
-            if valid_results:
-                review_count = sum(
-                    1 for result in valid_results
-                    if _should_review(result, low_confidence, review_sample_rate)
-                )
-                if review_count:
-                    try:
-                        emit_progress(
-                            categorized + failed,
-                            f"正在复核 {review_count} 条低置信/抽样结果",
-                        )
-                        valid_results = review_classification_results(
-                            chunk,
-                            valid_results,
-                            llm_context=llm_context,
-                            low_confidence=low_confidence,
-                            sample_rate=review_sample_rate,
-                        )
-                    except Exception as exc:
-                        last_error = str(exc)
-
-            by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
-
-            for txn in chunk:
-                result = by_id.get(txn["id"])
-                if not result:
-                    failed += 1
-                    emit_progress(categorized + failed)
-                    continue
-
-                category_id, subcategory_id = _valid_category_ids(
-                    result.get("category_id"),
-                    result.get("subcategory_id"),
-                )
-                if not category_id:
-                    category_id, subcategory_id = _resolve_category_ids(
-                        result.get("category", ""),
-                        result.get("subcategory", ""),
+                    valid_results = review_classification_results(
+                        chunk,
+                        valid_results,
+                        llm_context=llm_context,
+                        low_confidence=low_confidence,
+                        sample_rate=review_sample_rate,
                     )
-                if not category_id:
-                    failed += 1
-                    emit_progress(categorized + failed)
-                    continue
+                except Exception as exc:
+                    last_error = str(exc)
 
-                merchant = result.get("merchant_name") or txn["cleaned_description"] or txn["raw_description"]
-                conn.execute(
+        by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
+
+        updates = []
+        for txn in chunk:
+            result = by_id.get(txn["id"])
+            if not result:
+                failed += 1
+                emit_progress(categorized + failed)
+                continue
+
+            category_id, subcategory_id = _valid_category_ids(
+                result.get("category_id"),
+                result.get("subcategory_id"),
+            )
+            if not category_id:
+                category_id, subcategory_id = _resolve_category_ids(
+                    result.get("category", ""),
+                    result.get("subcategory", ""),
+                )
+            if not category_id:
+                failed += 1
+                emit_progress(categorized + failed)
+                continue
+
+            display_description = (
+                txn["display_description"]
+                if txn["display_description_source"] == "manual"
+                else result.get("display_description")
+            )
+            display_description_source = txn["display_description_source"] if txn["display_description_source"] == "manual" else "llm"
+            updates.append((
+                category_id,
+                subcategory_id,
+                display_description,
+                display_description_source,
+                _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
+                result.get("classification_review_status") or "not_reviewed",
+                result.get("classification_review_reason") or result.get("review_reason"),
+                txn["id"],
+            ))
+
+        if updates:
+            with db_connection() as conn:
+                conn.executemany(
                     """UPDATE transactions
                        SET category_id = ?,
                            subcategory_id = ?,
                            is_categorized = 1,
-                           cleaned_description = ?,
+                           display_description = ?,
+                           display_description_source = ?,
                            classification_confidence = ?,
                            classification_review_status = ?,
                            classification_review_reason = ?
                        WHERE id = ?""",
-                    (
-                        category_id,
-                        subcategory_id,
-                        merchant,
-                        _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
-                        result.get("classification_review_status") or "not_reviewed",
-                        result.get("classification_review_reason") or result.get("review_reason"),
-                        txn["id"],
-                    ),
+                    updates,
                 )
-                categorized += 1
-                emit_progress(categorized + failed)
+            categorized += len(updates)
+            emit_progress(categorized + failed)
 
     return {"total": total, "categorized": categorized, "failed": failed, "error": last_error}
 
@@ -608,7 +633,11 @@ def _split_valid_batch_results(rows, results: list[dict]) -> tuple[list[dict], l
             )
         if not category_id:
             continue
+        display_description = (result.get("display_description") or "").strip()
+        if not display_description:
+            continue
         next_result = dict(result)
+        next_result["display_description"] = display_description
         next_result["category_id"] = category_id
         next_result["subcategory_id"] = subcategory_id
         next_result["classification_confidence"] = _clean_confidence(
@@ -652,10 +681,10 @@ def review_classification_results(
             continue
         review_items.append({
             "id": result["id"],
-            "description": row["cleaned_description"] or row["raw_description"],
+            "description": row["display_description"] or row["raw_description"],
             "raw_description": row["raw_description"],
             "amount": row["amount"],
-            "merchant_name": result.get("merchant_name"),
+            "display_description": result.get("display_description"),
             "category_id": result.get("category_id"),
             "subcategory_id": result.get("subcategory_id"),
             "confidence": _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
@@ -738,7 +767,7 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
     items = [
         {
             "id": r["id"],
-            "description": r["cleaned_description"] or r["raw_description"],
+            "description": r["display_description"] or r["raw_description"],
             "amount": r["amount"],
             **(
                 {"refund_context": refund_context}
@@ -752,7 +781,7 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
 - 这是修复批次：必须只处理输入里给出的 id，不能遗漏任何一条。
 - 如果上次结果无法确定，请重新用 LLM 判断；不要编造不存在的分类 ID。
 """ if strict else ""
-    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID、置信度。
+    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出清洗后的交易描述、一级分类ID、二级分类ID、置信度。
 
 分类表：
 {category_choices}
@@ -762,7 +791,10 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- merchant_name 要短，只保留清晰的商户/交易对方名称。
+- display_description 要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
+- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
+- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
+- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
 - subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
 - 如果输入含 refund_context，优先参考候选原始交易来判断退款分类。
@@ -771,7 +803,7 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
 {strict_rules}
 
 JSON 格式：
-{{"results":[{{"id":1,"merchant_name":"...","category_id":1,"subcategory_id":2,"confidence":88}}]}}"""
+{{"results":[{{"id":1,"display_description":"...","category_id":1,"subcategory_id":2,"confidence":88}}]}}"""
     content = _call_llm(
         system_prompt,
         json.dumps(items, ensure_ascii=False),

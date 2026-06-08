@@ -7,10 +7,11 @@ _db_path = DATABASE_URL.replace("sqlite:///", "")
 
 
 def get_db():
-    conn = sqlite3.connect(_db_path)
+    conn = sqlite3.connect(_db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -41,7 +42,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date DATE NOT NULL,
             raw_description TEXT NOT NULL,
-            cleaned_description TEXT NOT NULL,
+            display_description TEXT NOT NULL,
+            display_description_source TEXT DEFAULT 'rule',
             amount REAL NOT NULL,
             currency TEXT DEFAULT 'CNY',
             account_name TEXT,
@@ -56,16 +58,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS merchant_mappings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pattern TEXT NOT NULL UNIQUE,
-            display_name TEXT NOT NULL,
-            is_regex INTEGER DEFAULT 0
-        );
-
         CREATE TABLE IF NOT EXISTS correction_examples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            description TEXT NOT NULL,
+            raw_description TEXT NOT NULL,
+            display_description TEXT NOT NULL,
             category_id INTEGER NOT NULL REFERENCES categories(id),
             subcategory_id INTEGER REFERENCES categories(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -82,6 +78,25 @@ def init_db():
             conn.execute("ALTER TABLE transactions ADD COLUMN account_name TEXT")
         if "payment_channel" not in columns:
             conn.execute("ALTER TABLE transactions ADD COLUMN payment_channel TEXT")
+        if "display_description" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN display_description TEXT")
+            conn.execute(
+                """UPDATE transactions
+                   SET display_description = raw_description
+                   WHERE display_description IS NULL OR display_description = ''"""
+            )
+        conn.execute(
+            """UPDATE transactions
+               SET display_description = raw_description
+               WHERE display_description IS NULL OR display_description = ''"""
+        )
+        if "display_description_source" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN display_description_source TEXT DEFAULT 'rule'")
+            conn.execute(
+                """UPDATE transactions
+                   SET display_description_source = 'rule'
+                   WHERE display_description_source IS NULL OR display_description_source = ''"""
+            )
         if "classification_confidence" not in columns:
             conn.execute("ALTER TABLE transactions ADD COLUMN classification_confidence INTEGER")
         if "classification_review_status" not in columns:

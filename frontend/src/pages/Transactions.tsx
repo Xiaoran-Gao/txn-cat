@@ -416,7 +416,7 @@ export default function Transactions() {
                       <td><input type="checkbox" checked={selected.has(t.id)} onChange={() => toggleSelect(t.id)} /></td>
                       <td className="date-cell">{t.date}</td>
                       <td className="desc-cell" title={t.raw_description}>
-                        <strong>{t.cleaned_description || t.raw_description}</strong>
+                        <strong>{t.display_description || t.raw_description}</strong>
                         <span>{t.raw_description}</span>
                       </td>
                       <td className="account-cell">{getAccount(t)}</td>
@@ -614,6 +614,7 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
   const [subId, setSubId] = useState(txn.subcategory_id || 0);
   const [date, setDate] = useState(txn.date);
   const [desc, setDesc] = useState(txn.raw_description);
+  const [displayDesc, setDisplayDesc] = useState(txn.display_description || txn.raw_description);
   const [amount, setAmount] = useState(String(txn.amount));
 
   const parentCats = categories.filter((c) => !c.parent_id);
@@ -624,6 +625,7 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
     await api.updateTransaction(txn.id, {
       date,
       raw_description: desc,
+      display_description: displayDesc,
       amount: parseFloat(amount),
       category_id: catId || null,
       subcategory_id: subId || null,
@@ -636,7 +638,8 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>编辑交易</h2>
         <div className="form-group"><label>日期</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-        <div className="form-group"><label>描述</label><input value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
+        <div className="form-group"><label>展示描述</label><input value={displayDesc} onChange={(e) => setDisplayDesc(e.target.value)} /></div>
+        <div className="form-group"><label>原始描述</label><input value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
         <div className="form-group"><label>金额</label><input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
         <div className="form-group"><label>分类</label>
           <select value={catId} onChange={(e) => { setCatId(Number(e.target.value)); setSubId(0); }}>

@@ -36,24 +36,6 @@ DEFAULT_CATEGORIES = [
     ]),
 ]
 
-DEFAULT_MERCHANT_MAPPINGS = [
-    ("美团", "美团"),
-    ("饿了么", "饿了么"),
-    ("滴滴", "滴滴出行"),
-    ("支付宝", "支付宝"),
-    ("微信", "微信支付"),
-    ("京东", "京东"),
-    ("淘宝", "淘宝"),
-    ("拼多多", "拼多多"),
-    ("抖音", "抖音"),
-    ("中国石化", "中国石化"),
-    ("国家电网", "国家电网"),
-    ("中国移动", "中国移动"),
-    ("中国联通", "中国联通"),
-    ("中国电信", "中国电信"),
-]
-
-
 def seed_default_data():
     with db_connection() as conn:
         cur = conn.execute("SELECT COUNT(*) FROM categories")
@@ -69,11 +51,3 @@ def seed_default_data():
                         "INSERT INTO categories (name, parent_id) VALUES (?, ?)",
                         (sub_name, parent_id)
                     )
-
-        cur = conn.execute("SELECT COUNT(*) FROM merchant_mappings")
-        if cur.fetchone()[0] == 0:
-            for pattern, display in DEFAULT_MERCHANT_MAPPINGS:
-                conn.execute(
-                    "INSERT INTO merchant_mappings (pattern, display_name, is_regex) VALUES (?, ?, 0)",
-                    (pattern, display)
-                )

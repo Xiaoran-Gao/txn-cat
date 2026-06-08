@@ -29,7 +29,7 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
     with db_connection() as conn:
         for txn in transactions:
             try:
-                cleaned = normalize_description(txn["description"])
+                display_description = normalize_description(txn["description"])
                 existing = conn.execute(
                     """SELECT id, is_categorized FROM transactions
                        WHERE date = ? AND raw_description = ? AND amount = ?""",
@@ -42,12 +42,14 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
                     continue
 
                 conn.execute(
-                    """INSERT INTO transactions (date, raw_description, cleaned_description, amount, account_name, payment_channel)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO transactions
+                       (date, raw_description, display_description, display_description_source, amount, account_name, payment_channel)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         txn["date"],
                         txn["description"],
-                        cleaned,
+                        display_description,
+                        "rule",
                         txn["amount"],
                         txn.get("account_name"),
                         txn.get("payment_channel"),
@@ -81,14 +83,15 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
 
 @router.post("")
 def create_transaction(txn: TransactionCreate):
-    cleaned = normalize_description(txn.description)
+    display_description = normalize_description(txn.description)
     with db_connection() as conn:
         cur = conn.execute(
-            """INSERT INTO transactions (date, raw_description, cleaned_description, amount, currency, account_name, payment_channel, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')""",
-            (txn.date.isoformat(), txn.description, cleaned, txn.amount, txn.currency, txn.account_name, txn.payment_channel),
+            """INSERT INTO transactions
+               (date, raw_description, display_description, display_description_source, amount, currency, account_name, payment_channel, source)
+               VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, 'manual')""",
+            (txn.date.isoformat(), txn.description, display_description, txn.amount, txn.currency, txn.account_name, txn.payment_channel),
         )
-        return {"id": cur.lastrowid, "cleaned_description": cleaned}
+        return {"id": cur.lastrowid, "display_description": display_description}
 
 
 @router.get("")
@@ -126,7 +129,7 @@ def list_transactions(
         conditions.append("t.subcategory_id = ?")
         params.append(subcategory_id)
     if search:
-        conditions.append("(t.raw_description LIKE ? OR t.cleaned_description LIKE ?)")
+        conditions.append("(t.raw_description LIKE ? OR t.display_description LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
     if is_categorized is not None:
         conditions.append("t.is_categorized = ?")
@@ -194,8 +197,13 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
             from services.normalizer import normalize_description
             fields.append("raw_description = ?")
             params.append(update.raw_description)
-            fields.append("cleaned_description = ?")
+            fields.append("display_description = ?")
             params.append(normalize_description(update.raw_description))
+            fields.append("display_description_source = 'rule'")
+        if update.display_description is not None:
+            fields.append("display_description = ?")
+            params.append(update.display_description.strip() or existing["raw_description"])
+            fields.append("display_description_source = 'manual'")
         if update.amount is not None:
             fields.append("amount = ?")
             params.append(update.amount)
@@ -223,9 +231,15 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
         # Save correction example if user changed category
         if update.category_id is not None:
             conn.execute(
-                """INSERT OR IGNORE INTO correction_examples (description, category_id, subcategory_id)
-                   VALUES (?, ?, ?)""",
-                (existing["cleaned_description"], update.category_id, update.subcategory_id),
+                """INSERT INTO correction_examples
+                   (raw_description, display_description, category_id, subcategory_id)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    existing["raw_description"],
+                    update.display_description or existing["display_description"],
+                    update.category_id,
+                    update.subcategory_id,
+                ),
             )
 
     return {"status": "ok"}
@@ -297,20 +311,30 @@ def categorize_single(txn_id: int):
 
     with db_connection() as conn:
         txn = conn.execute(
-            "SELECT cleaned_description, raw_description, amount FROM transactions WHERE id = ?",
+            """SELECT display_description, display_description_source, raw_description, amount
+               FROM transactions
+               WHERE id = ?""",
             (txn_id,),
         ).fetchone()
         if not txn:
             raise HTTPException(404, "Transaction not found")
 
-    result = categorize_transaction(txn["cleaned_description"], txn["amount"], txn["raw_description"])
+    result = categorize_transaction(txn["display_description"], txn["amount"], txn["raw_description"])
     if result.get("category_id"):
+        display_description = (
+            txn["display_description"]
+            if txn["display_description_source"] == "manual"
+            else result["display_description"]
+        )
+        display_description_source = txn["display_description_source"] if txn["display_description_source"] == "manual" else "llm"
         with db_connection() as conn:
             conn.execute(
                 """UPDATE transactions
                    SET category_id = ?,
                        subcategory_id = ?,
                        is_categorized = 1,
+                       display_description = ?,
+                       display_description_source = ?,
                        classification_confidence = ?,
                        classification_review_status = ?,
                        classification_review_reason = ?
@@ -318,6 +342,8 @@ def categorize_single(txn_id: int):
                 (
                     result["category_id"],
                     result.get("subcategory_id"),
+                    display_description,
+                    display_description_source,
                     result.get("classification_confidence"),
                     result.get("classification_review_status"),
                     result.get("classification_review_reason"),

@@ -3,7 +3,6 @@ import type {
   Category,
   ClassificationJob,
   ImportResult,
-  MerchantMapping,
   NLQueryResult,
   SummaryData,
   Transaction,
@@ -62,7 +61,7 @@ export const api = {
     return upload<ImportResult>("/transactions/import", form);
   },
   createTransaction: (data: { date: string; description: string; amount: number }) =>
-    request<{ id: number; cleaned_description: string }>("/transactions", { method: "POST", body: JSON.stringify(data) }),
+    request<{ id: number; display_description: string }>("/transactions", { method: "POST", body: JSON.stringify(data) }),
   listTransactions: (params: QueryParams) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
@@ -102,8 +101,4 @@ export const api = {
   // System
   health: () => request<{ database: boolean; ollama: boolean; ollama_model: string; ollama_model_active: string | null; ollama_error: string | null }>("/system/health"),
   models: () => request<{ models: string[]; active_model?: string | null; error?: string }>("/system/models"),
-  merchants: () => request<MerchantMapping[]>("/system/merchants"),
-  createMerchant: (data: { pattern: string; display_name: string; is_regex: boolean }) =>
-    request<{ id: number }>("/system/merchants", { method: "POST", body: JSON.stringify(data) }),
-  deleteMerchant: (id: number) => request<{ status: string }>(`/system/merchants/${id}`, { method: "DELETE" }),
 };
