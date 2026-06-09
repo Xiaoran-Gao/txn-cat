@@ -99,6 +99,18 @@ export const api = {
     request<NLQueryResult>("/query", { method: "POST", body: JSON.stringify({ question }) }),
 
   // System
-  health: () => request<{ database: boolean; ollama: boolean; ollama_model: string; ollama_model_active: string | null; ollama_error: string | null }>("/system/health"),
+  health: () => request<{
+    database: boolean;
+    ollama: boolean;
+    ollama_model: string;
+    ollama_model_active: string | null;
+    ollama_error: string | null;
+    version: string;
+    storage: {
+      kind: string;
+      bytes: number;
+      files: { path: string; bytes: number }[];
+    };
+  }>("/system/health"),
   models: () => request<{ models: string[]; active_model?: string | null; error?: string }>("/system/models"),
 };

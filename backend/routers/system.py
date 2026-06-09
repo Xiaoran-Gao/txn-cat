@@ -1,9 +1,27 @@
+from pathlib import Path
+
 from fastapi import APIRouter
+from config import APP_VERSION, DATABASE_URL
 from database import db_connection
 from services.categorizer import check_ollama
 from config import OLLAMA_MODEL
 
 router = APIRouter()
+
+
+def sqlite_storage_usage() -> dict:
+    db_path = Path(DATABASE_URL.replace("sqlite:///", ""))
+    related_paths = [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+    files = [
+        {"path": str(path), "bytes": path.stat().st_size}
+        for path in related_paths
+        if path.exists()
+    ]
+    return {
+        "kind": "sqlite",
+        "bytes": sum(item["bytes"] for item in files),
+        "files": files,
+    }
 
 
 @router.get("/health")
@@ -31,6 +49,8 @@ def health():
         "ollama_model": OLLAMA_MODEL,
         "ollama_model_active": ollama_model_active,
         "ollama_error": ollama_error,
+        "version": APP_VERSION,
+        "storage": sqlite_storage_usage(),
     }
 
 

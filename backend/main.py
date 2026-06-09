@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from config import APP_VERSION
 from database import init_db
 from seed_data import seed_default_data
 
-app = FastAPI(title="TxnCatAI", version="0.1.0")
+app = FastAPI(title="TxnCatAI", version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,

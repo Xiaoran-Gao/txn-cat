@@ -2,19 +2,16 @@ import { NavLink } from "react-router-dom";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Cat,
-  ChevronDown,
   ChevronsLeft,
-  CircleDollarSign,
   FolderTree,
   LayoutDashboard,
-  Menu,
   MessageSquareText,
-  Monitor,
   ReceiptText,
   Search,
   Settings,
   UploadCloud,
 } from "lucide-react";
+import { api } from "../api/client";
 
 const navItems = [
   {
@@ -43,16 +40,45 @@ const navItems = [
 
 export default function Layout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [statusText, setStatusText] = useState("本地运行中");
+  const [systemInfo, setSystemInfo] = useState({
+    statusText: "检测中",
+    statusOk: false,
+    databaseOk: false,
+    storageText: "读取中",
+    versionText: "版本读取中",
+  });
 
   useEffect(() => {
-    const labels = ["本地运行中", "隐私模式", "AI 待命中"];
-    let index = 0;
-    const timer = window.setInterval(() => {
-      index = (index + 1) % labels.length;
-      setStatusText(labels[index]);
-    }, 2600);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    api.health()
+      .then((health) => {
+        if (cancelled) return;
+        const statusText = health.database && health.ollama
+          ? "AI 待命中"
+          : health.database
+            ? "本地运行中"
+            : "数据库异常";
+        setSystemInfo({
+          statusText,
+          statusOk: health.database && health.ollama,
+          databaseOk: health.database,
+          storageText: `数据库 ${formatBytes(health.storage.bytes)}`,
+          versionText: `v${health.version}`,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSystemInfo({
+          statusText: "后端不可用",
+          statusOk: false,
+          databaseOk: false,
+          storageText: "存储不可用",
+          versionText: "版本未知",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -89,13 +115,12 @@ export default function Layout({ children }: { children: ReactNode }) {
             <div>
               <ReceiptText size={17} />
               <strong>本地存储</strong>
-              <span className="live-dot" />
+              <span className={`live-dot ${systemInfo.databaseOk ? "" : "danger"}`} />
             </div>
-            <p>已用 284.3 MB / 2 GB</p>
-            <div className="storage-track"><span /></div>
+            <p>{systemInfo.storageText}</p>
           </div>
           <div className="sidebar-bottom">
-            <span>v1.3.2</span>
+            <span>{systemInfo.versionText}</span>
             <button className="sidebar-collapse" onClick={() => setCollapsed((v) => !v)} title="折叠侧栏">
               <ChevronsLeft size={16} />
             </button>
@@ -104,12 +129,6 @@ export default function Layout({ children }: { children: ReactNode }) {
       </aside>
       <main className="main-frame">
         <header className="topbar">
-          <button className="topbar-menu" onClick={() => setCollapsed((v) => !v)} title="切换侧栏">
-            <Menu size={20} />
-          </button>
-          <div className="topbar-orbit" aria-hidden="true">
-            <CircleDollarSign size={17} />
-          </div>
           <div className="global-search">
             <Search size={18} />
             <input placeholder="搜索描述" />
@@ -117,18 +136,27 @@ export default function Layout({ children }: { children: ReactNode }) {
           </div>
           <div className="topbar-actions">
             <div className="system-pill">
-              <span className="live-dot" />
+              <span className={`live-dot ${systemInfo.statusOk ? "" : "danger"}`} />
               <span>系统状态</span>
-              <strong>{statusText}</strong>
+              <strong className={systemInfo.statusOk ? "" : "danger"}>{systemInfo.statusText}</strong>
             </div>
-            <button className="device-btn" title="显示模式">
-              <Monitor size={18} />
-              <ChevronDown size={15} />
-            </button>
           </div>
         </header>
         <div className="main-content">{children}</div>
       </main>
     </div>
   );
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "不可用";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
