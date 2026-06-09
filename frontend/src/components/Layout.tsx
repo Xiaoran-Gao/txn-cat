@@ -4,6 +4,7 @@ import {
   Cat,
   ChevronDown,
   ChevronsLeft,
+  CircleDollarSign,
   FolderTree,
   LayoutDashboard,
   Menu,
@@ -16,12 +17,28 @@ import {
 } from "lucide-react";
 
 const navItems = [
-  { to: "/", label: "上传", icon: UploadCloud },
-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/transactions", label: "交易记录", icon: ReceiptText },
-  { to: "/query", label: "智能问答", icon: MessageSquareText },
-  { to: "/categories", label: "分类管理", icon: FolderTree },
-  { to: "/settings", label: "设置", icon: Settings },
+  {
+    title: "Home",
+    className: "home-group",
+    items: [
+      { to: "/", label: "首页", icon: UploadCloud },
+    ],
+  },
+  {
+    title: "Workspace",
+    items: [
+      { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/query", label: "智能问答", icon: MessageSquareText },
+    ],
+  },
+  {
+    title: "Data",
+    items: [
+      { to: "/transactions", label: "交易记录", icon: ReceiptText },
+      { to: "/categories", label: "分类管理", icon: FolderTree },
+      { to: "/settings", label: "设置", icon: Settings },
+    ],
+  },
 ];
 
 export default function Layout({ children }: { children: ReactNode }) {
@@ -43,20 +60,28 @@ export default function Layout({ children }: { children: ReactNode }) {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="brand-mark"><Cat size={21} /></div>
-          <strong>TxnCat<span>AI</span></strong>
+          <div className="brand-copy">
+            <strong>TxnCat<span>AI</span></strong>
+            <small>Private ledger OS</small>
+          </div>
         </div>
         <nav className="sidebar-nav">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) => isActive ? "active" : ""}
-              title={item.label}
-            >
-              <item.icon size={18} strokeWidth={1.9} />
-              <span>{item.label}</span>
-            </NavLink>
+          {navItems.map((group) => (
+            <div className={`sidebar-nav-group ${group.className || ""}`} key={group.title}>
+              <span className="nav-group-label">{group.title}</span>
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.to === "/"}
+                  className={({ isActive }) => isActive ? "active" : ""}
+                  title={item.label}
+                >
+                  <item.icon size={18} strokeWidth={1.9} />
+                  <span>{item.label}</span>
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-footer">
@@ -82,6 +107,9 @@ export default function Layout({ children }: { children: ReactNode }) {
           <button className="topbar-menu" onClick={() => setCollapsed((v) => !v)} title="切换侧栏">
             <Menu size={20} />
           </button>
+          <div className="topbar-orbit" aria-hidden="true">
+            <CircleDollarSign size={17} />
+          </div>
           <div className="global-search">
             <Search size={18} />
             <input placeholder="搜索描述" />
