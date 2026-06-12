@@ -24,7 +24,7 @@ const navItems = [
   {
     title: "Workspace",
     items: [
-      { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/dashboard", label: "消费看板", icon: LayoutDashboard },
       { to: "/query", label: "智能问答", icon: MessageSquareText },
     ],
   },
@@ -88,7 +88,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <div className="brand-mark"><Cat size={21} /></div>
           <div className="brand-copy">
             <strong>TxnCat<span>AI</span></strong>
-            <small>Private ledger OS</small>
+            <small>私人账本系统</small>
           </div>
         </div>
         <nav className="sidebar-nav">
