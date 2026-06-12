@@ -90,6 +90,11 @@ export interface AnomalyItem {
   detail: string;
 }
 
+export interface MonthlySummaryResult {
+  summary: string;
+  source: "llm" | "fallback";
+}
+
 export interface NLQueryResult {
   answer: string;
   sql: string;

@@ -1,4 +1,26 @@
 from database import db_connection
+from services.categorizer import _call_llm
+
+
+MONTHLY_SUMMARY_SYSTEM_PROMPT = """你是一个个人消费分析助手。
+
+下面是已经由代码计算好的消费分析结果。
+请注意：
+
+1. 不要重新计算任何数字。
+2. 不要编造输入中不存在的信息。
+3. 只引用给定 JSON 中的事实。
+4. 输出要简洁、自然，适合普通用户阅读。
+5. 不要使用太重的金融术语。
+
+请按照以下结构输出：
+
+1. 总体消费情况
+2. 主要消费类别变化
+3. 商户 / 平台消费习惯
+4. 异常交易提醒
+5. 下月建议
+"""
 
 
 def get_monthly_summary(month: str) -> dict:
@@ -56,6 +78,29 @@ def get_monthly_summary(month: str) -> dict:
             "mom_change_pct": mom_change,
             "top_category": top_cat["name"] if top_cat else None,
         }
+
+
+def generate_monthly_narrative(analytics: dict) -> dict:
+    """Turn precomputed monthly analytics JSON into a concise local LLM narrative."""
+    import json
+
+    if not isinstance(analytics, dict):
+        return {"summary": "", "source": "fallback"}
+
+    payload = json.dumps(analytics, ensure_ascii=False, indent=2)
+    prompt = f"输入数据：\n{payload}"
+    try:
+        summary = _call_llm(
+            MONTHLY_SUMMARY_SYSTEM_PROMPT,
+            prompt,
+            temperature=0.2,
+            num_predict=700,
+            json_mode=False,
+        )
+    except Exception:
+        return {"summary": "", "source": "fallback"}
+
+    return {"summary": summary.strip(), "source": "llm" if summary.strip() else "fallback"}
 
 
 def get_trends(months: int = 12) -> list[dict]:

@@ -581,6 +581,7 @@ Dashboard currently provides:
   - daily average spending
   - spending transaction count
   - average transaction amount
+  - covered category count, excluding uncategorized spending
   - month-over-month change when previous month spending exists
   - anomaly count
 - daily spending heatmap for the active month

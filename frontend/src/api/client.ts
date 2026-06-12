@@ -3,6 +3,7 @@ import type {
   Category,
   ClassificationJob,
   ImportResult,
+  MonthlySummaryResult,
   NLQueryResult,
   SummaryData,
   Transaction,
@@ -93,6 +94,8 @@ export const api = {
   trends: (months = 12) => request<TrendItem[]>(`/analysis/trends?months=${months}`),
   anomalies: (month: string) => request<AnomalyItem[]>(`/analysis/anomalies?month=${month}`),
   monthlySpend: (months = 12) => request<{ categories: string[]; data: Record<string, string | number>[] }>(`/analysis/monthly-spend?months=${months}`),
+  monthlySummary: (analytics: Record<string, unknown>) =>
+    request<MonthlySummaryResult>("/analysis/monthly-summary", { method: "POST", body: JSON.stringify({ analytics }) }),
 
   // NL Query
   query: (question: string) =>
