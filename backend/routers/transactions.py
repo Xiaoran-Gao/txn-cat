@@ -43,8 +43,8 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
 
                 conn.execute(
                     """INSERT INTO transactions
-                       (date, raw_description, display_description, display_description_source, amount, account_name, payment_channel)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (date, raw_description, display_description, display_description_source, amount, account_name, payment_channel, merchant_platform)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         txn["date"],
                         txn["description"],
@@ -53,6 +53,7 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
                         txn["amount"],
                         txn.get("account_name"),
                         txn.get("payment_channel"),
+                        txn.get("merchant_platform"),
                     ),
                 )
                 imported_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -87,9 +88,18 @@ def create_transaction(txn: TransactionCreate):
     with db_connection() as conn:
         cur = conn.execute(
             """INSERT INTO transactions
-               (date, raw_description, display_description, display_description_source, amount, currency, account_name, payment_channel, source)
-               VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, 'manual')""",
-            (txn.date.isoformat(), txn.description, display_description, txn.amount, txn.currency, txn.account_name, txn.payment_channel),
+               (date, raw_description, display_description, display_description_source, amount, currency, account_name, payment_channel, merchant_platform, source)
+               VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, ?, 'manual')""",
+            (
+                txn.date.isoformat(),
+                txn.description,
+                display_description,
+                txn.amount,
+                txn.currency,
+                txn.account_name,
+                txn.payment_channel,
+                txn.merchant_platform,
+            ),
         )
         return {"id": cur.lastrowid, "display_description": display_description}
 
@@ -207,12 +217,16 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
         if update.amount is not None:
             fields.append("amount = ?")
             params.append(update.amount)
-        if update.account_name is not None:
+        update_fields = getattr(update, "model_fields_set", set())
+        if "account_name" in update_fields:
             fields.append("account_name = ?")
             params.append(update.account_name)
-        if update.payment_channel is not None:
+        if "payment_channel" in update_fields:
             fields.append("payment_channel = ?")
             params.append(update.payment_channel)
+        if "merchant_platform" in update_fields:
+            fields.append("merchant_platform = ?")
+            params.append(update.merchant_platform)
         if update.category_id is not None:
             fields.append("category_id = ?")
             params.append(update.category_id)

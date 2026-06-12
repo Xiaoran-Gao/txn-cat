@@ -21,6 +21,44 @@ CHANNEL_KEYWORDS = [
     ("交通银行", ["交通银行", "bankcomm"]),
 ]
 
+BANK_KEYWORDS = [
+    ("招商银行", ["招商银行", "招行", "cmb"]),
+    ("中国银行", ["中国银行", "boc"]),
+    ("工商银行", ["工商银行", "工行", "icbc"]),
+    ("建设银行", ["建设银行", "建行", "ccb"]),
+    ("农业银行", ["农业银行", "农行", "abc"]),
+    ("交通银行", ["交通银行", "交行", "bankcomm"]),
+    ("浦发银行", ["浦发银行", "浦发"]),
+    ("中信银行", ["中信银行", "中信"]),
+    ("兴业银行", ["兴业银行", "兴业"]),
+    ("民生银行", ["民生银行", "民生"]),
+    ("广发银行", ["广发银行", "广发"]),
+    ("平安银行", ["平安银行", "平安"]),
+    ("光大银行", ["光大银行", "光大"]),
+    ("邮储银行", ["邮储银行", "邮政储蓄"]),
+]
+
+PLATFORM_KEYWORDS = [
+    ("美团", ["美团", "meituan"]),
+    ("饿了么", ["饿了么", "eleme"]),
+    ("滴滴", ["滴滴", "didi"]),
+    ("淘宝", ["淘宝", "taobao"]),
+    ("天猫", ["天猫", "tmall"]),
+    ("京东", ["京东", "jd.com", "jingdong"]),
+    ("拼多多", ["拼多多", "pinduoduo"]),
+    ("抖音", ["抖音", "douyin"]),
+    ("小红书", ["小红书", "xiaohongshu"]),
+    ("携程", ["携程", "ctrip", "trip.com"]),
+    ("高德", ["高德", "amap"]),
+]
+
+ACCOUNT_VALUE_KEYWORDS = (
+    "余额", "零钱", "花呗", "余额宝", "银行卡", "信用卡", "储蓄卡", "借记卡",
+    "尾号", "卡尾号", "末四位", "后四位",
+)
+ACCOUNT_NAME_HINTS = ("账户", "付款", "收款", "支付", "方式", "account", "method", "card")
+ACCOUNT_ID_HINTS = ("账号", "手机号", "手机", "账户号", "用户", "登录", "phone", "mobile", "id")
+
 
 def read_csv_with_fallback(file: BinaryIO, filename: str) -> pd.DataFrame:
     """Read bank-exported CSV files with locale encodings and preamble rows."""
@@ -98,8 +136,8 @@ def detect_account_from_preamble(lines: list[str]) -> str | None:
         if any(key in clean for key in ("账户", "账号", "卡号", "银行卡")):
             parts = [part.strip() for part in re.split(r"[,，:\t：]", clean) if part.strip()]
             if len(parts) >= 2:
-                return parts[-1]
-            return clean
+                return normalize_account_name(parts[-1])
+            return normalize_account_name(clean)
     return None
 
 
@@ -108,6 +146,49 @@ def detect_payment_channel(filename: str, text: str) -> str | None:
     for channel, keywords in CHANNEL_KEYWORDS:
         if any(keyword.lower() in haystack for keyword in keywords):
             return channel
+    return None
+
+
+def detect_bank_name(text: str) -> str | None:
+    haystack = text.lower()
+    for bank, keywords in BANK_KEYWORDS:
+        if any(keyword.lower() in haystack for keyword in keywords):
+            return bank
+    return None
+
+
+def extract_card_tail(text: str) -> str | None:
+    tail_match = re.search(r"(?:尾号|末四位|后四位|卡尾号)\D*(\d{4})", text)
+    if tail_match:
+        return tail_match.group(1)
+
+    digit_groups = re.findall(r"\d[\d\s*·.-]*\d", text)
+    for group in reversed(digit_groups):
+        digits = re.sub(r"\D", "", group)
+        if len(digits) >= 4:
+            return digits[-4:]
+    return None
+
+
+def normalize_account_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+
+    bank = detect_bank_name(text)
+    tail = extract_card_tail(text)
+    if bank and tail:
+        return f"{bank}（尾号 {tail}）"
+    return text
+
+
+def detect_merchant_platform(text: str) -> str | None:
+    haystack = text.lower()
+    for platform, keywords in PLATFORM_KEYWORDS:
+        if any(keyword.lower() in haystack for keyword in keywords):
+            return platform
     return None
 
 
@@ -142,8 +223,11 @@ def ai_detect_columns(df: pd.DataFrame, result: dict) -> dict:
     sample = df.head(8).astype(str).to_dict(orient="records")
     system_prompt = """你是账单表格列映射助手。根据列名和样本行判断每一列的语义。
 只返回 JSON，值必须是原始列名或 null。不要解释。
-字段：date_col, desc_col, amount_col, expense_col, income_col, account_col, channel_col。
-如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。"""
+字段：date_col, desc_col, amount_col, expense_col, income_col, account_col, channel_col, platform_col。
+如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。
+account_col 是实际扣款或入账账户，例如银行卡、信用卡、微信零钱、支付宝余额、花呗，列名可能表达为收付款方式。
+channel_col 是支付通道或机构，例如微信、支付宝、银行渠道，不要和 account_col 混淆。
+platform_col 是消费平台或商户应用，例如美团、饿了么、滴滴、淘宝。"""
     user_prompt = json.dumps({
         "columns": [str(c) for c in df.columns],
         "sample_rows": sample,
@@ -160,6 +244,78 @@ def ai_detect_columns(df: pd.DataFrame, result: dict) -> dict:
     return result
 
 
+def text_values_for_score(df: pd.DataFrame, col) -> list[str]:
+    values = []
+    for value in df[col].head(20):
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            values.append(text)
+    return values
+
+
+def is_account_identifier(text: str) -> bool:
+    compact = re.sub(r"\D", "", text)
+    if re.fullmatch(r"1\d{10}", compact):
+        return True
+    if len(compact) >= 8 and len(compact) == len(re.sub(r"\s", "", text)):
+        return True
+    return False
+
+
+def account_value_score(text: str) -> float:
+    score = 0.0
+    if any(keyword in text for keyword in ACCOUNT_VALUE_KEYWORDS):
+        score += 3.0
+    if detect_bank_name(text):
+        score += 2.5
+    if extract_card_tail(text):
+        score += 1.0
+    if is_account_identifier(text):
+        score -= 4.0
+    return score
+
+
+def account_column_score(df: pd.DataFrame, col) -> float:
+    name = str(col).lower()
+    score = 0.0
+    if any(hint.lower() in name for hint in ACCOUNT_NAME_HINTS):
+        score += 1.0
+    if any(hint.lower() in name for hint in ACCOUNT_ID_HINTS):
+        score -= 2.0
+
+    values = text_values_for_score(df, col)
+    if not values:
+        return score - 1.0
+
+    value_scores = [account_value_score(value) for value in values]
+    return score + sum(value_scores) / len(value_scores)
+
+
+def refine_account_column(df: pd.DataFrame, result: dict) -> dict:
+    excluded = {
+        result.get("date_col"),
+        result.get("desc_col"),
+        result.get("amount_col"),
+        result.get("expense_col"),
+        result.get("income_col"),
+        result.get("platform_col"),
+    }
+    candidates = [col for col in df.columns if col not in excluded]
+    if not candidates:
+        return result
+
+    best_col = max(candidates, key=lambda col: account_column_score(df, col))
+    best_score = account_column_score(df, best_col)
+    current_col = result.get("account_col")
+    current_score = account_column_score(df, current_col) if current_col in df.columns else -99
+
+    if best_score > current_score + 1.5 and best_score > 0:
+        result["account_col"] = best_col
+    return result
+
+
 def detect_columns(df: pd.DataFrame) -> dict:
     """Detect date, description, and amount columns by header name matching."""
     date_candidates = ["交易日期", "日期", "date", "transaction date", "posting date", "记账日期", "交易时间"]
@@ -169,8 +325,18 @@ def detect_columns(df: pd.DataFrame) -> dict:
     income_candidates = ["收入", "收入金额", "贷方金额", "收款金额"]
     account_candidates = ["账户", "账号", "卡号", "银行卡号", "交易账户", "付款账户", "收款账户", "account", "card"]
     channel_candidates = ["支付渠道", "渠道", "支付方式", "交易渠道", "来源", "source", "channel"]
+    platform_candidates = ["消费平台", "商户平台", "平台", "应用", "app", "platform"]
 
-    result = {"date_col": None, "desc_col": None, "amount_col": None, "expense_col": None, "income_col": None, "account_col": None, "channel_col": None}
+    result = {
+        "date_col": None,
+        "desc_col": None,
+        "amount_col": None,
+        "expense_col": None,
+        "income_col": None,
+        "account_col": None,
+        "channel_col": None,
+        "platform_col": None,
+    }
 
     cols_lower = {str(col).lower().strip(): col for col in df.columns}
 
@@ -209,8 +375,12 @@ def detect_columns(df: pd.DataFrame) -> dict:
             result["channel_col"] = cols_lower[cand]
             break
 
-    if not result["date_col"] or not result["desc_col"] or not (result["amount_col"] or result["expense_col"] or result["income_col"]):
-        result = ai_detect_columns(df, result)
+    for cand in platform_candidates:
+        if cand in cols_lower:
+            result["platform_col"] = cols_lower[cand]
+            break
+
+    result = refine_account_column(df, ai_detect_columns(df, result))
 
     # Fallback: use position-based guessing
     if result["date_col"] is None and len(df.columns) > 0:
@@ -256,10 +426,10 @@ def row_account(row, cols: dict, fallback: str | None) -> str | None:
     if cols.get("account_col") is not None:
         value = row[cols["account_col"]]
         if not pd.isna(value):
-            text = str(value).strip()
-            if text and text.lower() != "nan":
-                return text
-    return fallback
+            account = normalize_account_name(str(value))
+            if account:
+                return account
+    return normalize_account_name(fallback)
 
 
 def row_channel(row, cols: dict, fallback: str | None) -> str | None:
@@ -270,6 +440,16 @@ def row_channel(row, cols: dict, fallback: str | None) -> str | None:
             if text and text.lower() != "nan":
                 return text
     return fallback
+
+
+def row_platform(row, cols: dict, desc: str) -> str | None:
+    if cols.get("platform_col") is not None:
+        value = row[cols["platform_col"]]
+        if not pd.isna(value):
+            text = str(value).strip()
+            if text and text.lower() != "nan":
+                return text
+    return detect_merchant_platform(desc)
 
 
 def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
@@ -296,6 +476,7 @@ def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
         amount_val = row_amount(row, cols)
         account_val = row_account(row, cols, account_fallback)
         channel_val = row_channel(row, cols, channel_fallback)
+        platform_val = row_platform(row, cols, desc_val)
 
         if pd.isna(date_val) or not desc_val or amount_val is None or pd.isna(amount_val):
             continue
@@ -306,6 +487,7 @@ def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
             "amount": amount_val,
             "account_name": account_val,
             "payment_channel": channel_val,
+            "merchant_platform": platform_val,
         })
 
     return transactions

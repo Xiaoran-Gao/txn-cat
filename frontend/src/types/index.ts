@@ -8,6 +8,7 @@ export interface Transaction {
   currency: string;
   account_name: string | null;
   payment_channel: string | null;
+  merchant_platform: string | null;
   category_id: number | null;
   category_name: string | null;
   subcategory_id: number | null;
@@ -27,6 +28,7 @@ export interface TransactionUpdateInput {
   amount?: number;
   account_name?: string | null;
   payment_channel?: string | null;
+  merchant_platform?: string | null;
   category_id?: number | null;
   subcategory_id?: number | null;
 }

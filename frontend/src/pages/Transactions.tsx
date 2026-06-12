@@ -74,7 +74,7 @@ export default function Transactions() {
       .then((d) => {
         const accountFiltered = accountFilter === "all"
           ? d.items
-          : d.items.filter((txn) => getAccount(txn) === accountFilter);
+          : d.items.filter((txn) => getAccountName(txn) === accountFilter);
         setTxns(accountFiltered);
         setTotal(d.total);
       })
@@ -243,7 +243,7 @@ export default function Transactions() {
   }, [txns]);
 
   const accountOptions = useMemo(() => {
-    return Array.from(new Set(txns.map(getAccount))).sort();
+    return Array.from(new Set(txns.map(getAccountName).filter((account) => account !== "导入账单"))).sort();
   }, [txns]);
 
   const categoryPie = useMemo(() => {
@@ -417,9 +417,12 @@ export default function Transactions() {
                       <td className="date-cell">{t.date}</td>
                       <td className="desc-cell" title={t.raw_description}>
                         <strong>{t.display_description || t.raw_description}</strong>
-                        <span>{t.raw_description}</span>
+                        {formatDescriptionMeta(t) && <span>{formatDescriptionMeta(t)}</span>}
                       </td>
-                      <td className="account-cell">{getAccount(t)}</td>
+                      <td className="account-cell">
+                        <strong>{getAccountName(t)}</strong>
+                        {t.payment_channel && <span>{t.payment_channel}</span>}
+                      </td>
                       <td>
                         {t.category_name ? (
                           <span className={`category-chip ${categoryTone(t.category_name)}`}>
@@ -552,9 +555,12 @@ function StatCard({ label, value, meta, icon, tone }: { label: string; value: st
   );
 }
 
-function getAccount(txn: Transaction) {
-  if (txn.account_name && txn.payment_channel) return `${txn.payment_channel} · ${txn.account_name}`;
-  return txn.account_name || txn.payment_channel || "导入账单";
+function getAccountName(txn: Transaction) {
+  return txn.account_name || "导入账单";
+}
+
+function formatDescriptionMeta(txn: Transaction) {
+  return txn.merchant_platform || "";
 }
 
 function categoryTone(name: string) {
@@ -586,10 +592,20 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [desc, setDesc] = useState("");
   const [amount, setAmount] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [paymentChannel, setPaymentChannel] = useState("");
+  const [merchantPlatform, setMerchantPlatform] = useState("");
 
   const handleSubmit = async () => {
     if (!date || !desc || !amount) return;
-    await api.createTransaction({ date, description: desc, amount: parseFloat(amount) });
+    await api.createTransaction({
+      date,
+      description: desc,
+      amount: parseFloat(amount),
+      account_name: emptyToNull(accountName),
+      payment_channel: emptyToNull(paymentChannel),
+      merchant_platform: emptyToNull(merchantPlatform),
+    });
     onSaved();
   };
 
@@ -600,6 +616,11 @@ function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
         <div className="form-group"><label>日期</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
         <div className="form-group"><label>描述</label><input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="交易描述" /></div>
         <div className="form-group"><label>金额（正数=支出）</label><input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></div>
+        <div className="form-grid two-col">
+          <div className="form-group"><label>账户</label><input value={accountName} onChange={(e) => setAccountName(e.target.value)} placeholder="招商银行（尾号 1234）/ 微信零钱 / 支付宝余额" /></div>
+          <div className="form-group"><label>支付渠道</label><input value={paymentChannel} onChange={(e) => setPaymentChannel(e.target.value)} placeholder="微信 / 支付宝 / 银行卡" /></div>
+        </div>
+        <div className="form-group"><label>消费平台</label><input value={merchantPlatform} onChange={(e) => setMerchantPlatform(e.target.value)} placeholder="美团 / 饿了么 / 滴滴" /></div>
         <div className="form-actions">
           <button className="btn btn-secondary" onClick={onClose}>取消</button>
           <button className="btn btn-primary" onClick={handleSubmit}>添加</button>
@@ -616,6 +637,9 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
   const [desc, setDesc] = useState(txn.raw_description);
   const [displayDesc, setDisplayDesc] = useState(txn.display_description || txn.raw_description);
   const [amount, setAmount] = useState(String(txn.amount));
+  const [accountName, setAccountName] = useState(txn.account_name || "");
+  const [paymentChannel, setPaymentChannel] = useState(txn.payment_channel || "");
+  const [merchantPlatform, setMerchantPlatform] = useState(txn.merchant_platform || "");
 
   const parentCats = categories.filter((c) => !c.parent_id);
   const selectedParent = parentCats.find((c) => c.id === catId);
@@ -627,6 +651,9 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
       raw_description: desc,
       display_description: displayDesc,
       amount: parseFloat(amount),
+      account_name: emptyToNull(accountName),
+      payment_channel: emptyToNull(paymentChannel),
+      merchant_platform: emptyToNull(merchantPlatform),
       category_id: catId || null,
       subcategory_id: subId || null,
     });
@@ -641,6 +668,11 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
         <div className="form-group"><label>展示描述</label><input value={displayDesc} onChange={(e) => setDisplayDesc(e.target.value)} /></div>
         <div className="form-group"><label>原始描述</label><input value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
         <div className="form-group"><label>金额</label><input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+        <div className="form-grid two-col">
+          <div className="form-group"><label>账户</label><input value={accountName} onChange={(e) => setAccountName(e.target.value)} placeholder="招商银行（尾号 1234）/ 微信零钱 / 支付宝余额" /></div>
+          <div className="form-group"><label>支付渠道</label><input value={paymentChannel} onChange={(e) => setPaymentChannel(e.target.value)} placeholder="微信 / 支付宝 / 银行卡" /></div>
+        </div>
+        <div className="form-group"><label>消费平台</label><input value={merchantPlatform} onChange={(e) => setMerchantPlatform(e.target.value)} placeholder="美团 / 饿了么 / 滴滴" /></div>
         <div className="form-group"><label>分类</label>
           <select value={catId} onChange={(e) => { setCatId(Number(e.target.value)); setSubId(0); }}>
             <option value={0}>未分类</option>
@@ -662,4 +694,9 @@ function EditModal({ txn, categories, onClose, onSaved }: { txn: Transaction; ca
       </div>
     </div>
   );
+}
+
+function emptyToNull(value: string) {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }

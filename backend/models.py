@@ -26,6 +26,7 @@ class TransactionCreate(BaseModel):
     currency: str = "CNY"
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
+    merchant_platform: Optional[str] = None
 
 
 class TransactionUpdate(BaseModel):
@@ -35,6 +36,7 @@ class TransactionUpdate(BaseModel):
     amount: Optional[float] = None
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
+    merchant_platform: Optional[str] = None
     category_id: Optional[int] = None
     subcategory_id: Optional[int] = None
 
@@ -49,6 +51,7 @@ class TransactionOut(BaseModel):
     currency: str
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
+    merchant_platform: Optional[str] = None
     category_id: Optional[int] = None
     category_name: Optional[str] = None
     subcategory_id: Optional[int] = None

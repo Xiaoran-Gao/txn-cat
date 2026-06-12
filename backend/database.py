@@ -48,6 +48,7 @@ def init_db():
             currency TEXT DEFAULT 'CNY',
             account_name TEXT,
             payment_channel TEXT,
+            merchant_platform TEXT,
             category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             classification_confidence INTEGER,
