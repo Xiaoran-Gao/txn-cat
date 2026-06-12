@@ -1,155 +1,83 @@
-# TxnCatAI — Local Transaction Intelligence
+# TxnCatAI Spec
 
-## Overview
+## 1. Product Summary
 
-A local-first web application for a monthly personal finance ritual: manually upload the latest bank, Alipay, WeChat, or card statement as Excel/CSV, let the system parse and deduplicate transactions, generate readable display descriptions, categorize spending with a local LLM (Ollama 8B), then review a monthly dashboard and ask questions in Chinese. Single-user, privacy-preserving — all transaction data, SQLite storage, and AI processing stays on the machine. Primary language: Chinese (transactions and UI).
+TxnCatAI is a local-first, single-user transaction categorization and analysis app for Chinese personal finance workflows.
 
-The product should feel upload-first, not report-first. The home screen is the starting point for the month: a clear bill upload entry, local privacy status, import progress/results, and the fastest path into classification, spending trends, and natural-language questions.
+The implemented product lets the user:
 
----
+- upload Excel or CSV transaction statements
+- parse and normalize transaction rows into SQLite
+- deduplicate imported rows
+- classify transactions with a local Ollama model
+- review, edit, delete, and manually add transactions
+- maintain a two-level category tree
+- ask natural-language Chinese questions that are converted into read-only SQLite queries
+- inspect local database and Ollama health from Settings
 
-## Product Workflow
+All persisted transaction data is stored locally in SQLite. LLM classification and natural-language querying are implemented through local Ollama.
 
-1. **Upload this month's bill**: The user drags in or selects an Excel/CSV statement from a bank, Alipay, WeChat, or card account.
-2. **Understand the bill format**: The app detects payment channel, account, date, description, and amount columns. It uses deterministic header/sample heuristics first and asks the local LLM to map columns when the format is ambiguous.
-3. **Parse, deduplicate, and classify**: The app imports new rows, skips duplicates, stores account/channel metadata, and automatically runs local Ollama categorization for newly imported transactions.
-4. **Review monthly dashboard**: After upload, the home screen refreshes into a dashboard with spend, income, category mix, trend movement, and classification coverage.
-5. **Ask the ledger**: The user asks questions in Chinese, backed by read-only SQL over the local transaction database.
+## 2. Runtime Stack
 
-### Primary Screens
+| Layer | Implemented Choice |
+| --- | --- |
+| Backend | Python, FastAPI |
+| Database | SQLite at `data/txncatai.db` by default |
+| AI Runtime | Ollama local chat API |
+| Frontend | React, Vite, TypeScript |
+| Charts | Recharts |
+| Icons | lucide-react |
+| File Parsing | pandas, openpyxl, Python csv utilities |
+| Dev Scripts | `scripts/dev.sh`, `scripts/stop-dev.sh` |
 
-- **Home / Upload Center**: The default route. Provides the main upload dropzone, import/classification result, monthly status, local privacy indicators, charts, and entry points into transaction review and AI questions.
-- **Transactions**: Detailed transaction table for filtering, correction, recategorization, and manual edits.
-- **AI Query**: Conversational analysis for spending questions and drill-downs.
-- **Categories**: Category tree management.
-- **Settings**: Local model and database status.
+Default backend settings are in `backend/config.py`:
 
----
+```text
+APP_VERSION=0.1.0
+DATABASE_URL=sqlite:///data/txncatai.db
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3:8b
+OLLAMA_TIMEOUT=180
+OLLAMA_BATCH_SIZE=4
+OLLAMA_RETRY_BATCH_SIZE=2
+OLLAMA_REVIEW_LOW_CONFIDENCE=80
+OLLAMA_REVIEW_SAMPLE_RATE=0
+OLLAMA_MAX_RETRIES=5
+MAX_CORRECTION_EXAMPLES=20
+```
 
-## Tech Stack
+## 3. Implemented User Workflow
 
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Backend | Python + FastAPI | Mature ecosystem, easy Ollama integration, good data analysis libs |
-| Database | SQLite | Zero-config, single-file, perfect for single-user local use |
-| AI | Ollama (local 8B model) | Local inference, no data leaves the machine |
-| Frontend | React + Recharts | Component-rich dashboard, good charting library |
-| File Parsing | Pandas + openpyxl + Ollama-assisted mapping | Robust Excel/CSV handling across bank, Alipay, and WeChat statement formats |
-| Packaging | Docker (optional) | One-command startup if desired |
+1. The user starts the app with `./scripts/dev.sh`.
+2. The backend initializes SQLite tables and seeds default Chinese categories if none exist.
+3. The user uploads `.xlsx`, `.xls`, or `.csv` from Home or Transactions.
+4. The parser detects transaction columns, payment channel, account, and merchant platform when possible.
+5. The importer normalizes descriptions, inserts new rows, skips duplicates, and creates a background classification job for new or still-uncategorized duplicate rows.
+6. The frontend polls the classification job endpoint and displays progress.
+7. The user reviews transactions, filters/searches/sorts them, edits metadata and categories, deletes rows, or triggers AI classification again.
+8. The user can ask Chinese questions in the AI Query page. The backend asks Ollama for SELECT SQL, validates it against dangerous write keywords, runs it against SQLite, then asks Ollama to summarize the result in Chinese.
 
----
+## 4. Backend Implementation
 
-## Feature Set
+### 4.1 App Startup
 
-### Phase 1 — MVP
+`backend/main.py` creates the FastAPI app, enables permissive local CORS for localhost/127.0.0.1 ports, initializes the database, seeds categories, and registers routers:
 
-#### 1. Transaction Ingestion
-- **Excel Import**: Upload .xlsx/.xls file; system auto-detects transaction columns (`date`, `description`, `amount` or `expense/income`) by header matching, sample inspection, and AI-assisted mapping when needed.
-- **CSV Import**: Supports CSV with Chinese locale encodings (UTF-8/GB18030/GBK/Big5), preamble rows, and common delimiters (comma, tab, semicolon, pipe).
-- **Home Upload Center**: The home screen exposes the primary drag-and-drop/file-picker upload interaction and shows import + automatic classification feedback.
-- **Payment Channel Detection**: Detect Alipay, WeChat Pay, and common bank sources from filename, preamble text, column headers, and channel/account columns.
-- **Account Metadata**: Store `account_name` and `payment_channel` per transaction when available; display real account/channel values instead of generated labels.
-- **Manual Entry**: A form to add a single transaction (date, description, amount).
-- **Duplicate Detection**: On import, skip transactions that match an existing row on (date, description, amount).
+- `/api/transactions`
+- `/api/categories`
+- `/api/analysis`
+- `/api/query`
+- `/api/system`
 
-#### 2. Data Pipeline — Format Understanding, Cleaning & AI Categorization
+### 4.2 Database
 
-The system processes uploads through a three-phase pipeline:
+`backend/database.py` creates and migrates the local SQLite schema. SQLite is opened with:
 
-**Phase A — Statement Format Understanding**:
-- Runs during upload before row import.
-- Detects CSV encoding, delimiter, preamble rows, payment channel, account metadata, and transaction table header.
-- Maps date/description/amount columns with deterministic rules first.
-- If required columns remain ambiguous, sends column names and a small sample of rows to local Ollama and asks for a structured column mapping.
+- `PRAGMA journal_mode=WAL`
+- `PRAGMA foreign_keys=ON`
+- `PRAGMA busy_timeout=30000`
 
-**Phase B — Rule-Based Pre-Cleaning** (on import, non-LLM):
-- Runs automatically on import and manual entry. Fast, deterministic, no LLM call.
-- Strips mechanical noise via regex: transaction IDs, reference numbers, dates, redundant suffixes ("消费", "快捷支付").
-- Does NOT do semantic replacement (that's the LLM's job).
-- Stores both `raw_description` (original) and `display_description` (human-readable display text). The initial value comes from deterministic pre-cleaning.
-
-**Phase C — Local LLM Categorization**:
-- Runs automatically for newly imported transactions after dedupe.
-- Uses Ollama locally; there is no rule-based category fallback.
-- Before calling Ollama, groups pending transactions by deterministic `display_description` (the pre-cleaned Display Merchant) plus amount direction (`positive` / `negative` / `zero`). Only one representative transaction per group is sent to the LLM.
-- Batches the distinct representative transactions in a single prompt to reduce slow local-model round trips.
-- For each representative transaction, the LLM returns `{display_description, category, subcategory}`; valid results are copied back to all transactions in that group.
-- Manual `display_description` edits are preserved when group classification results are applied.
-- Uses the editable category tree and recent user corrections as prompt context.
-- If a category/subcategory cannot be resolved or Ollama fails, the transaction remains uncategorized for manual review.
-
-**Category Hierarchy** (two-level, Chinese, user-editable):
-  - 餐饮美食 (餐馆, 快餐, 外卖, 咖啡饮品, 零食)
-  - 交通出行 (公共交通, 加油充电, 打车代驾, 停车费, 汽车维修)
-  - 购物消费 (服饰鞋包, 数码电器, 家居日用, 网购, 商超百货)
-  - 休闲娱乐 (视频会员, 电影演出, 游戏, 运动健身, 图书)
-  - 住房居家 (房租房贷, 水电燃气, 物业费, 通讯宽带, 维修)
-  - 医疗健康 (药店, 医院诊所, 体检, 保险)
-  - 金融理财 (银行手续费, 利息收支, 投资理财, 信用卡还款)
-  - 旅行出行 (机票, 酒店, 火车票, 景点游玩)
-  - 教育学习 (培训, 资料, 学费)
-  - 收入 (工资, 兼职, 退款, 理财收益)
-  - 其他 (其他)
-
-#### 3. User Corrections & Learning
-- **Re-categorize**: Click any transaction to change its category/subcategory.
-- **Correction Memory**: Corrected (raw description, display description, category, subcategory) examples are stored. The most recent N (default 20) are included as few-shot examples in subsequent LLM prompts.
-- **Correction Management**: View and clear stored corrections in Settings.
-
-#### 4. Transaction Management
-- **List View**: Paginated, sortable, filterable table (by date range, category, account/channel, amount range, source).
-- **Search**: Free-text search on description.
-- **Edit/Delete**: Modify any transaction field or remove it.
-- **Bulk Operations**: Select multiple and re-categorize or delete.
-
-#### 5. Category Management
-- View the full category tree.
-- Add, rename, or delete categories/subcategories.
-- Deleting a category prompts reassignment of its transactions.
-
-#### 6. Natural Language Query
-- **Chat Interface**: A dedicated page where the user types questions in Chinese about their spending.
-- **LLM-to-SQL**: The question is sent to the LLM along with the DB schema. The LLM generates a SQL query, which is executed read-only against the database. Results are returned and rendered as text + optional chart.
-- **Example Queries**:
-  - "上个月我在外卖上花了多少钱？"
-  - "今年餐饮支出最高的三个月是哪些？"
-  - "打车支出最近半年是什么趋势？"
-  - "这个月有没有特别大额的异常交易？"
-- **Safety**: Only SELECT queries are allowed. The LLM prompt instructs read-only SQL generation.
-
-#### 7. Monthly Dashboard
-- **Upload Status**: Show whether the current local ledger has data, how many transactions were imported, how many were automatically categorized, and how many remain uncategorized.
-- **Summary Cards**: Monthly spend, income, transaction count, and categorization coverage.
-- **Trend Preview**: Recent month spend/income trend after import.
-- **Category Structure**: Top spending categories and uncategorized share.
-- **Next Actions**: Guide users to transaction review or natural language questions after automatic import/classification.
-
----
-
-### Phase 2 — Analysis & Insights (Future)
-
-#### 8. Trend Detection
-- Per-category linear trends over 6–12 months. Highlight fastest-growing categories.
-
-#### 9. Anomaly Detection
-- Per-category spend vs 3-month moving average (2σ threshold).
-- Unusual single transactions via IQR method.
-
-#### 10. Export
-- Export filtered transactions to Excel/CSV.
-
----
-
-### Phase 3 — Advanced (Future)
-
-#### 11. Photo Upload (OCR)
-- Upload photos of bank card transaction records (screenshots, receipts, paper statements).
-- OCR extraction of transaction details: date, description, amount from images.
-- Auto-import extracted transactions into the system for categorization and analysis.
-
----
-
-## Database Schema
+Implemented tables:
 
 ```sql
 CREATE TABLE categories (
@@ -162,20 +90,21 @@ CREATE TABLE categories (
 CREATE TABLE transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date DATE NOT NULL,
-    raw_description TEXT NOT NULL,       -- original description from bank
-    display_description TEXT NOT NULL,   -- LLM/rule-cleaned human-readable transaction text
-    display_description_source TEXT DEFAULT 'rule', -- rule | llm | manual
+    raw_description TEXT NOT NULL,
+    display_description TEXT NOT NULL,
+    display_description_source TEXT DEFAULT 'rule',
     amount REAL NOT NULL,
     currency TEXT DEFAULT 'CNY',
-    account_name TEXT,                  -- parsed account/card/wallet label when available
-    payment_channel TEXT,               -- e.g. Alipay, WeChat Pay, bank name
+    account_name TEXT,
+    payment_channel TEXT,
+    merchant_platform TEXT,
     category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-    classification_confidence INTEGER,  -- LLM self-rated confidence, 0-100
-    classification_review_status TEXT,  -- not_reviewed | review_approved | review_corrected | review_invalid | review_missing | manual
-    classification_review_reason TEXT,  -- short reviewer note when present
-    source TEXT DEFAULT 'import',        -- 'import' | 'manual'
-    is_categorized INTEGER DEFAULT 0,   -- 0 = pending, 1 = done
+    classification_confidence INTEGER,
+    classification_review_status TEXT,
+    classification_review_reason TEXT,
+    source TEXT DEFAULT 'import',
+    is_categorized INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -189,246 +118,641 @@ CREATE TABLE correction_examples (
 );
 ```
 
----
+Implemented indexes:
 
-## API Endpoints
-
-### Transactions
-```
-POST   /api/transactions/import          - Excel/CSV file upload, parse, dedupe, auto-categorize new rows
-POST   /api/transactions                 - Create single transaction
-GET    /api/transactions                 - List (query: page, per_page, start_date, end_date,
-                                           category_id, subcategory_id, search, is_categorized,
-                                           sort_by, sort_order)
-GET    /api/transactions/:id             - Get single transaction
-PUT    /api/transactions/:id             - Update transaction
-DELETE /api/transactions/:id             - Delete transaction
-POST   /api/transactions/bulk-update     - Bulk update category
-DELETE /api/transactions/bulk-delete     - Bulk delete
-POST   /api/transactions/categorize      - Trigger AI categorization for all uncategorized rows
-POST   /api/transactions/:id/categorize  - Re-categorize single transaction with AI
+```sql
+CREATE INDEX idx_txn_date ON transactions(date);
+CREATE INDEX idx_txn_category ON transactions(category_id);
+CREATE INDEX idx_txn_subcategory ON transactions(subcategory_id);
+CREATE INDEX idx_txn_categorized ON transactions(is_categorized);
 ```
 
-### Categories
-```
-GET    /api/categories                   - Get full category tree
-POST   /api/categories                   - Create category/subcategory
-PUT    /api/categories/:id               - Rename category
-DELETE /api/categories/:id               - Delete category (with reassignment)
+### 4.3 Default Categories
+
+`backend/seed_data.py` seeds a two-level Chinese category tree:
+
+- 餐饮美食: 餐馆, 快餐, 外卖, 咖啡饮品, 零食
+- 交通出行: 公共交通, 加油充电, 打车代驾, 停车费, 汽车维修
+- 购物消费: 服饰鞋包, 数码电器, 家居日用, 网购, 商超百货
+- 休闲娱乐: 视频会员, 电影演出, 游戏, 运动健身, 图书
+- 住房居家: 房租房贷, 水电燃气, 物业费, 通讯宽带, 维修
+- 医疗健康: 药店, 医院诊所, 体检, 保险
+- 金融理财: 银行手续费, 利息收支, 投资理财, 信用卡还款
+- 旅行出行: 机票, 酒店, 火车票, 景点游玩
+- 教育学习: 培训, 资料, 学费
+- 收入: 工资, 兼职, 退款, 理财收益
+- 其他: 其他
+
+## 5. Import and Parsing
+
+Implemented in `backend/services/parser.py` and `backend/routers/transactions.py`.
+
+### 5.1 Supported Files
+
+- `.xlsx`
+- `.xls`
+- `.csv`
+
+Unsupported file extensions are rejected with HTTP 400.
+
+### 5.2 CSV Handling
+
+CSV parsing supports multiple encodings:
+
+- `utf-8-sig`
+- `utf-8`
+- `gb18030`
+- `gbk`
+- `big5`
+- `latin1`
+
+CSV header detection scans preamble rows and common delimiters:
+
+- comma
+- tab
+- semicolon
+- pipe
+
+The parser can detect account information from preamble text and payment channel from filename/preamble/header context.
+
+### 5.3 Column Detection
+
+The parser detects:
+
+- date column
+- description column
+- single amount column
+- split expense/income columns
+- account column
+- payment channel column
+- merchant platform column
+
+Detection uses header matching and sample heuristics. It also calls local Ollama for structured column mapping through `ai_detect_columns`, then falls back to position-based guesses when needed.
+
+### 5.4 Metadata Detection
+
+Implemented metadata fields:
+
+- `account_name`
+- `payment_channel`
+- `merchant_platform`
+
+Payment channel detection currently recognizes common Chinese wallets and banks, including Alipay, WeChat Pay, CMB, BOC, ICBC, CCB, ABC, and Bankcomm by keyword.
+
+Merchant platform detection currently recognizes platforms such as 美团, 饿了么, 滴滴, 淘宝, 天猫, 京东, 拼多多, 抖音, 小红书, 携程, and 高德 by keyword.
+
+### 5.5 Amount Semantics
+
+Implemented convention:
+
+- positive amount = spending
+- negative amount = income or refund
+
+For split expense/income columns:
+
+- expense values are imported as positive amounts
+- income values are imported as negative amounts
+
+### 5.6 Deduplication
+
+Import deduplication checks:
+
+```text
+date + raw_description + amount
 ```
 
-### Analysis
-```
-GET    /api/analysis/summary              - Monthly summary (query: month)
-GET    /api/analysis/trends               - Per-category trends (query: months=12)
-GET    /api/analysis/anomalies            - Anomaly feed (query: month)
-GET    /api/analysis/monthly-spend        - Monthly totals for chart (query: months=12)
+Existing duplicates are skipped. If a duplicate existing row is still uncategorized, its id is included in the classification job.
+
+## 6. Description Normalization
+
+Implemented in `backend/services/normalizer.py`.
+
+On import and manual creation, the app stores:
+
+- `raw_description`: original statement text
+- `display_description`: deterministic cleaned display text
+- `display_description_source`: initially `rule`
+
+When the LLM later returns a better display description, the source becomes `llm`, unless the user manually edited the display description. Manual display descriptions are preserved during grouped classification updates.
+
+## 7. AI Categorization
+
+Implemented in `backend/services/categorizer.py` and `backend/services/classification_jobs.py`.
+
+### 7.1 Ollama Model Selection
+
+The classifier checks available local Ollama models. If the configured model exists, it uses it. If not, it falls back to the first available local model. If no local model is available, classification fails with an Ollama availability error.
+
+### 7.2 Classification Jobs
+
+Bulk classification is asynchronous from the frontend perspective:
+
+1. API creates an in-memory classification job.
+2. FastAPI `BackgroundTasks` runs classification.
+3. Frontend polls `/api/transactions/categorize/jobs/{job_id}`.
+
+Job fields:
+
+- `id`
+- `source`: `upload` or `manual`
+- `status`: `queued`, `running`, `done`, `failed`
+- `total`
+- `processed`
+- `categorized`
+- `failed`
+- `message`
+- `error`
+- `created_at`
+- `updated_at`
+
+Jobs are in-memory only and do not survive backend restart.
+
+### 7.3 Grouping Before LLM Calls
+
+Batch classification groups transactions by:
+
+```text
+display_description + amount direction
 ```
 
-### Natural Language Query
+Amount direction is:
+
+- `positive`
+- `negative`
+- `zero`
+
+Only one representative row per group is sent to the LLM. Valid results are copied back to all rows in the group.
+
+### 7.4 Batch Classification
+
+The LLM prompt includes:
+
+- category id tree
+- recent correction examples
+- transaction id
+- display description
+- raw description
+- amount
+- optional refund context
+
+The model is expected to return JSON with:
+
+- `id`
+- `display_description`
+- `category_id`
+- `subcategory_id`
+- `confidence`
+
+The backend validates category ids and subcategory parentage before updating transactions.
+
+### 7.5 Retry Behavior
+
+Invalid or missing batch results are retried in smaller chunks using a stricter LLM prompt. If a valid category cannot be resolved after retry, affected rows remain uncategorized and count as failed.
+
+### 7.6 Review Agent
+
+The second LLM review pass is implemented for:
+
+- confidence below `OLLAMA_REVIEW_LOW_CONFIDENCE`
+- deterministic sampled rows controlled by `OLLAMA_REVIEW_SAMPLE_RATE`
+
+The reviewer can approve or correct category/subcategory ids and writes:
+
+- `classification_review_status`
+- `classification_review_reason`
+- updated confidence
+
+Default sample rate is currently `0`, so only low-confidence review runs by default.
+
+### 7.7 Refund Context
+
+If the transaction looks like a refund by negative amount or refund-related keywords, the classifier searches recent categorized positive transactions by amount similarity and recency. Candidate originals are included in the LLM prompt as context.
+
+## 8. Transactions API
+
+Implemented endpoints:
+
+```text
+POST   /api/transactions/import
+POST   /api/transactions
+GET    /api/transactions
+GET    /api/transactions/{txn_id}
+PUT    /api/transactions/{txn_id}
+DELETE /api/transactions/{txn_id}
+POST   /api/transactions/bulk-update
+DELETE /api/transactions/bulk-delete
+POST   /api/transactions/categorize
+GET    /api/transactions/categorize/jobs/{job_id}
+POST   /api/transactions/{txn_id}/categorize
 ```
-POST   /api/query                         - NL query, returns {answer, sql, data}
+
+Implemented list query parameters:
+
+- `page`
+- `per_page`
+- `start_date`
+- `end_date`
+- `category_id`
+- `subcategory_id`
+- `search`
+- `is_categorized`
+- `sort_by`: `date`, `amount`, `created_at`
+- `sort_order`: `asc`, `desc`
+
+Manual transaction creation supports:
+
+- date
+- description
+- amount
+- currency
+- account name
+- payment channel
+- merchant platform
+
+Transaction update supports:
+
+- date
+- raw description
+- display description
+- amount
+- account name
+- payment channel
+- merchant platform
+- category id
+- subcategory id
+
+When a category is manually assigned, the transaction is marked categorized, review status becomes `manual`, and a correction example is stored.
+
+## 9. Categories API
+
+Implemented endpoints:
+
+```text
+GET    /api/categories
+POST   /api/categories
+PUT    /api/categories/{cat_id}
+DELETE /api/categories/{cat_id}?reassign_to={id}
 ```
 
-### System
+Implemented behavior:
+
+- list returns a nested two-level tree
+- create supports top-level categories and subcategories
+- update renames a category
+- delete removes a category
+- optional `reassign_to` reassigns transactions that reference the deleted category
+
+Current frontend deletion does not pass `reassign_to`; deleting a category through the UI leaves affected transactions uncategorized/null through database foreign-key behavior.
+
+## 10. Analysis API
+
+Implemented in `backend/services/analysis.py`.
+
+```text
+GET /api/analysis/summary?month=YYYY-MM
+GET /api/analysis/trends?months=12
+GET /api/analysis/anomalies?month=YYYY-MM
+GET /api/analysis/monthly-spend?months=12
+POST /api/analysis/monthly-summary
 ```
-GET    /api/system/health                 - Health check (DB + Ollama)
-GET    /api/system/models                 - List available Ollama models
+
+### 10.1 Monthly Summary
+
+Returns:
+
+- month
+- total spend from positive amounts
+- total income from absolute negative amounts
+- positive-spend transaction count
+- month-over-month spend change when prior month has spend
+- top category by positive spend
+
+### 10.2 Trends
+
+Computes simple per-category linear trend over recent monthly totals. Categories with fewer than three data points return `数据不足`.
+
+### 10.3 Anomalies
+
+Implemented deterministic anomaly checks:
+
+- category spend spike above recent 3-month average plus 2 standard deviations
+- unusually high transaction within subcategory by IQR over recent 6 months
+
+Returns at most 20 anomaly items.
+
+### 10.4 Monthly Spend
+
+Returns monthly positive spend grouped by category for charting.
+
+### 10.5 Monthly Narrative
+
+`POST /api/analysis/monthly-summary` accepts precomputed monthly analytics JSON from the frontend Dashboard and asks the local LLM to write a concise Chinese monthly summary.
+
+Implemented prompt constraints:
+
+- do not recalculate numbers
+- do not invent missing facts
+- only cite facts from the provided JSON
+- write naturally for ordinary users
+- avoid heavy financial jargon
+
+If Ollama fails or returns an empty response, the endpoint returns:
+
+```json
+{"summary":"","source":"fallback"}
 ```
 
----
+The Dashboard then displays its deterministic fallback summary based on the same structured JSON.
 
-## LLM Prompt Design (Chinese)
+## 11. Natural-Language Query
 
-### Statement Column Mapping
+Implemented in `backend/services/nl_query.py`.
 
-Used only when deterministic header/sample detection cannot confidently identify required fields.
+Endpoint:
 
-```
-你是账单表格列映射助手。根据列名和样本行判断每一列的语义。
-只返回 JSON，值必须是原始列名或 null。不要解释。
-字段：date_col, desc_col, amount_col, expense_col, income_col, account_col, channel_col。
-如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。
+```text
+POST /api/query
 ```
 
-Input payload:
+Request:
+
+```json
+{"question":"上个月我的总支出是多少？"}
+```
+
+Response:
 
 ```json
 {
-  "columns": ["..."],
-  "sample_rows": [{ "...": "..." }]
+  "answer": "...",
+  "sql": "SELECT ...",
+  "data": [{ "...": "..." }]
 }
 ```
 
-### Batch Transaction Categorization
+Implemented flow:
 
-Used after import for newly inserted rows, and for manual recategorization batches. Before each batch, pending transactions are reduced to distinct representative rows grouped by pre-cleaned `display_description` plus amount direction, so repeated merchants/descriptions are classified once and then applied back to all matching transactions. Positive, negative, and zero-amount rows remain separate groups so refunds/income are not mixed with spending. The model classifies a chunk of representative transactions in one call and returns IDs plus an LLM self-rated confidence score. There is no rule-based category fallback; unparseable or invalid LLM outputs remain uncategorized or are retried through LLM only.
+1. Ollama receives a Chinese system prompt with SQLite schema and rules.
+2. Ollama generates SQL.
+3. Backend strips markdown fences and trailing semicolon.
+4. Backend rejects SQL containing write or schema-changing keywords:
+   - `INSERT`
+   - `UPDATE`
+   - `DELETE`
+   - `DROP`
+   - `ALTER`
+   - `CREATE`
+   - `ATTACH`
+   - `DETACH`
+5. Backend executes the SQL against SQLite.
+6. Ollama summarizes the SQL result in concise Chinese.
 
-```
-你是一个本地账单批量分类助手。根据每条交易描述和金额，输出商户名、一级分类ID、二级分类ID、置信度。
+Important limitation: the current validation blocks obvious dangerous keywords but does not parse SQL into an AST. It relies on keyword rejection plus prompt instructions.
 
-分类表：
-{category_choices}
+## 12. System API
 
-用户纠正记录：
-{corrections}
+Implemented endpoints:
 
-规则：
-- 每个输入 id 必须返回一条结果。
-- display_description 要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
-- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
-- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
-- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
-- category_id 必须选择一级分类 ID，不能使用二级分类 ID。
-- subcategory_id 必须属于该一级分类；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
-- confidence 输出 0-100 的整数，表示模型对分类的把握，不是统计学概率。
-- 如果输入含 refund_context，优先参考候选原始交易来判断退款分类。
-- 只返回 JSON 对象，不要 Markdown 或解释。
-
-JSON 格式：
-{"results":[{"id":1,"display_description":"...","category_id":1,"subcategory_id":2,"confidence":88}]}
-```
-
-### Low-Confidence / Sample Review Agent
-
-After the batch classifier returns valid IDs, a second LLM reviewer pass is used only for:
-
-- low-confidence items below `OLLAMA_REVIEW_LOW_CONFIDENCE` (default 80)
-- deterministic sampled high-confidence items controlled by `OLLAMA_REVIEW_SAMPLE_RATE` (default 0.10)
-
-The reviewer does not use deterministic classification rules. It receives the candidate classification, category ID table, correction examples, raw/display descriptions, amount, and confidence. It must return a valid category/subcategory ID pair or the original candidate is retained with a review status.
-
-Operational defaults prioritize local Ollama stability over maximum chunk size: `OLLAMA_BATCH_SIZE=16`, `OLLAMA_RETRY_BATCH_SIZE=8`, and `OLLAMA_MAX_RETRIES=3`. If Ollama returns 503 during classification, reduce batch size or review sample rate before increasing concurrency.
-
-```
-你是一个交易分类复核 agent。请审计候选分类，修正低置信或明显错误的分类。
-
-规则：
-- 每个输入 id 必须返回一条结果。
-- 如果候选分类合理，approved=true，并返回原 category_id/subcategory_id。
-- 如果候选分类不合理，approved=false，并返回修正后的 category_id/subcategory_id。
-- category_id 必须选择一级分类 ID；subcategory_id 必须属于该一级分类，不能编造 ID。
-- confidence 输出复核后的 0-100 整数。
-- reason 用一句很短的中文说明复核判断。
-- 只返回 JSON 对象，不要 Markdown 或解释。
+```text
+GET /api/system/health
+GET /api/system/models
 ```
 
-### NL Query Prompt
+Health returns:
 
-```
-你是一个SQL查询助手。根据用户的自然语言问题，生成一个SQLite查询语句。
-数据库schema如下：
+- database status
+- Ollama status
+- configured model
+- active model
+- Ollama error when present
+- app version
+- SQLite storage usage, including main db/WAL/SHM files
 
-CREATE TABLE transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date DATE NOT NULL,
-    raw_description TEXT NOT NULL,
-    display_description TEXT NOT NULL,
-    display_description_source TEXT DEFAULT 'rule',
-    amount REAL NOT NULL,
-    category_id INTEGER,
-    subcategory_id INTEGER,
-    classification_confidence INTEGER,
-    classification_review_status TEXT,
-    classification_review_reason TEXT,
-    ...
-);
+Models returns:
 
-CREATE TABLE categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    parent_id INTEGER
-);
+- available Ollama model names
+- active model
+- error if Ollama is unavailable or configured model is missing
 
-规则：
-- 只生成SELECT语句，禁止INSERT/UPDATE/DELETE/DROP等写操作。
-- 只返回SQL语句，不要输出其他内容。
-- 金额字段amount，正值表示支出，负值表示收入。
-- 日期字段date格式为'YYYY-MM-DD'。
+## 13. Frontend Implementation
 
-用户问题：{question}
+### 13.1 Routing
+
+Implemented routes in `frontend/src/App.tsx`:
+
+```text
+/              Home
+/dashboard     Dashboard
+/transactions  Transactions
+/query         NLQuery
+/categories    Categories
+/settings      Settings
 ```
 
----
+### 13.2 Home
 
-## Frontend Pages
+Implemented in `frontend/src/pages/Home.tsx`.
 
-### Layout
-- Sidebar: 交易记录, 智能问答, 分类管理, 设置
-- Chinese-first UI
+Home currently provides:
 
-### Page: 交易记录 (Transactions)
-- Top bar: Import Excel/CSV, Add Transaction, search, date range filter
-- Filter chips: category, categorization status
-- Table: date, description (display + raw), amount, category > subcategory, actions
-- Batch bar on selection
-- Pagination
+- upload-first landing experience
+- drag-and-drop and file-picker import
+- upload result summary
+- classification job progress polling
+- animated product story sections for classification, category tree, dashboard concept, and natural-language query
+- links into Transactions, Categories, Dashboard, and Query
 
-### Page: 智能问答 (NL Query)
-- Chat-like interface: text input + send button
-- Message history (question/answer pairs)
-- Answers render as text summary + optional simple chart/table
-- Suggested example questions as clickable chips
+After upload/classification completion, Home navigates to `/dashboard`.
 
-### Page: 分类管理 (Categories)
-- Tree view with edit/delete
-- Add category/subcategory form
+### 13.3 Dashboard
 
-### Page: 设置 (Settings)
-- Ollama config (URL, model, test connection)
-- Correction examples table
-- Data management (export, clear all)
+Implemented in `frontend/src/pages/Dashboard.tsx`.
 
----
+Dashboard currently provides:
 
-## Project Structure
+- upload Excel/CSV from the dashboard header
+- trigger "补全分类" for uncategorized spending rows
+- classification job progress polling
+- fetch all transaction pages through the list API
+- automatically select the latest month that has positive spending data
+- switch the dashboard analysis month from a header month selector
+- monthly overview metrics:
+  - total spending
+  - daily average spending
+  - spending transaction count
+  - average transaction amount
+  - month-over-month change when previous month spending exists
+  - anomaly count
+- daily spending heatmap for the active month
+- heatmap toggle between spending amount and transaction count
+- daily trend line chart
+- 7-day moving average
+- previous-month same-day comparison when previous-month data exists
+- category donut chart with Top categories and merged "其他"
+- category ranking with amount, share, count, and month-over-month change
+- Top 3 merchant ranking by amount
+- Top 3 merchant ranking by count
+- Top 3 platform ranking by amount/count when `merchant_platform` data exists
+- payment channel distribution when `payment_channel` data exists
+- account preference list when `account_name` data exists
+- anomaly cards
+- AI monthly summary
+- visible structured monthly analytics JSON used as LLM input
+- links to Transactions and AI Query
 
-```
-TxnCatAI/
+Dashboard analytics are computed deterministically in the frontend from persisted transaction rows before any monthly summary is requested from Ollama.
+
+Implemented Dashboard anomaly rules:
+
+- single transaction above recent 90-day P95 when at least 10 recent samples exist
+- single transaction above category recent 90-day mean plus 3 standard deviations when at least 5 category samples exist
+- daily spending above three times the current-month nonzero-day average
+- category month-over-month growth above 50%
+- same-merchant same-day repeated charges with close amounts
+
+Dashboard sends only structured monthly analytics JSON to `POST /api/analysis/monthly-summary`; it does not send raw transaction rows for narrative generation.
+
+### 13.4 Transactions
+
+Implemented in `frontend/src/pages/Transactions.tsx`.
+
+Transactions page currently provides:
+
+- Excel/CSV import
+- classification job progress banner
+- AI classify all pending transactions
+- manual transaction creation
+- transaction editing modal
+- single-row AI recategorization
+- row deletion
+- bulk deletion
+- bulk "mark for recategorization" action
+- search
+- category/subcategory filter
+- categorization status filter
+- account filter based on currently loaded rows
+- date/amount sorting
+- pagination at 50 rows per page
+- comfort/compact density toggle
+- current-page stat cards
+- category spend pie chart for loaded rows
+- recent loaded-row spend/income line chart
+- simple rotating insight card based on loaded rows
+
+Limitations in current implementation:
+
+- The visible "本月" date filter button is not wired to backend date filtering.
+- Account filtering is applied client-side to the currently loaded page, not backend-wide.
+- Bulk recategorization currently calls bulk update with `category_id: null`; backend only updates rows when `category_id` is not null, so this does not actually clear categorization or trigger AI classification by itself.
+
+### 13.5 Categories
+
+Implemented in `frontend/src/pages/Categories.tsx`.
+
+Categories page currently provides:
+
+- category tree display
+- expand/collapse top-level categories
+- add top-level category
+- add subcategory
+- rename category/subcategory
+- delete category/subcategory
+- summary counts for top-level and child categories
+
+### 13.6 AI Query
+
+Implemented in `frontend/src/pages/NLQuery.tsx`.
+
+AI Query page currently provides:
+
+- chat-like message history
+- Chinese input box
+- enter-to-send
+- example question chips
+- returned answer display
+- generated SQL display
+- first 10 returned data rows as a table
+
+### 13.7 Settings
+
+Implemented in `frontend/src/pages/Settings.tsx`.
+
+Settings currently displays:
+
+- database status
+- Ollama status
+- active/configured model
+
+## 14. Dev Scripts
+
+### 14.1 Start
+
+`scripts/dev.sh`:
+
+- frees existing backend/frontend ports with `lsof` and `kill`
+- starts backend with uvicorn
+- starts frontend with Vite
+- passes `VITE_API_BASE_URL` to frontend
+- defaults to backend `127.0.0.1:8000` and frontend `127.0.0.1:5173`
+
+### 14.2 Stop
+
+`scripts/stop-dev.sh` stops local dev processes on the configured ports.
+
+## 15. Current Known Gaps
+
+These are not implemented or not fully wired in the current code:
+
+- Settings does not yet expose correction example management or data export/clear controls.
+- Transaction list API supports date range filters, but the current Transactions UI does not wire a real date range picker.
+- Transaction list API does not support backend account/payment-channel/merchant-platform filters yet.
+- Natural-language SQL safety uses keyword rejection, not a SQL parser or read-only SQLite connection enforcement.
+- Classification jobs are stored in process memory and disappear on backend restart.
+- Correction examples are stored on manual category update, but there is no frontend screen to view or clear them.
+- Dashboard computes most rich monthly analytics in the frontend from fetched transaction rows; backend analysis endpoints exist but are not the main data source for the Dashboard page.
+
+## 16. Project Structure
+
+```text
+txn-cat/
 ├── backend/
 │   ├── main.py
 │   ├── config.py
 │   ├── database.py
 │   ├── models.py
+│   ├── seed_data.py
 │   ├── routers/
-│   │   ├── transactions.py
-│   │   ├── categories.py
 │   │   ├── analysis.py
-│   │   ├── query.py          # NL query endpoint
-│   │   └── system.py
-│   ├── services/
-│   │   ├── categorizer.py    # LLM categorization
-│   │   ├── parser.py         # Excel/CSV parsing + column detection
-│   │   ├── normalizer.py     # Mechanical description pre-cleaning
-│   │   ├── analysis.py       # Trend, anomaly, summary
-│   │   └── nl_query.py       # NL-to-SQL service
-│   └── seed_data.py          # Default categories
+│   │   ├── categories.py
+│   │   ├── query.py
+│   │   ├── system.py
+│   │   └── transactions.py
+│   └── services/
+│       ├── analysis.py
+│       ├── categorizer.py
+│       ├── classification_jobs.py
+│       ├── nl_query.py
+│       ├── normalizer.py
+│       └── parser.py
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx
-│   │   ├── api/
+│   │   ├── api/client.ts
+│   │   ├── components/Layout.tsx
 │   │   ├── pages/
-│   │   │   ├── Transactions.tsx
-│   │   │   ├── NLQuery.tsx
 │   │   │   ├── Categories.tsx
-│   │   │   └── Settings.tsx
-│   │   ├── components/
-│   │   └── types/
-│   └── package.json
-├── SPEC.md
-└── README.md
+│   │   │   ├── Dashboard.tsx
+│   │   │   ├── Home.tsx
+│   │   │   ├── NLQuery.tsx
+│   │   │   ├── Settings.tsx
+│   │   │   └── Transactions.tsx
+│   │   ├── types/index.ts
+│   │   └── index.css
+│   ├── package.json
+│   └── vite.config.ts
+├── scripts/
+│   ├── dev.sh
+│   └── stop-dev.sh
+├── README.md
+└── SPEC.md
 ```
-
----
-
-## Design Decisions
-
-1. **Excel First**: Primary input format is .xlsx/.xls (Chinese banks typically export Excel). CSV as secondary.
-2. **Chinese by Default**: UI, prompts, and category tree default to Chinese. Configurable to English.
-3. **Display Description in Pipeline**: Deterministic pre-cleaning creates an initial display description on import; LLM categorization replaces it with a more readable `display_description` unless the user manually edited it.
-4. **Two Descriptions Stored**: `raw_description` (original) and `display_description` (human-readable). Both visible in UI.
-5. **NL Query Safety**: Read-only SQL generation only. LLM prompt enforces SELECT-only.
-6. **No Auth**: Local single-user tool.
-7. **LLM-Only Categorization With Grouped Representatives and Selective Review**: The main path groups transactions by pre-cleaned `display_description` plus amount direction, classifies one representative per group in batched LLM calls, and applies valid results back to all rows in the group. Low-confidence results and a deterministic sample of high-confidence representative results go through a second LLM reviewer agent. Avoid fixed sequential multi-agent classification for every transaction because it multiplies local Ollama latency.
-8. **Refund Matching**: Refunds (negative amounts or descriptions with 退款/退货) are matched to candidate original transactions by amount similarity (±2% tolerance). Candidate transactions are included in the LLM prompt as context so the refund inherits the same category. Supports partial refunds (broader search by recency when exact amount doesn't match).
-9. **No Synthetic Analytics Data**: Dashboards, charts, confidence values, trends, and insight cards must be computed from persisted local data or explicit LLM outputs. Empty states are shown when no real data exists; do not display demo transactions, fake percentages, placeholder chart series, or fabricated confidence scores.
