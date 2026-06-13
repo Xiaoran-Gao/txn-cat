@@ -153,7 +153,7 @@ export default function Home() {
         ))}
       </nav>
 
-      <section className="story-screen upload-screen">
+      <section className={`story-screen upload-screen ${job ? "has-upload-job" : ""}`}>
         <div className="story-copy upload-story-copy">
           <span className="eyebrow"><ShieldCheck size={15} />本地优先财务助手</span>
           <h1>
@@ -202,10 +202,12 @@ export default function Home() {
           <div className="upload-icon"><FileSpreadsheet size={28} /></div>
           <strong>{job ? "正在进行 LLM 分类..." : "拖拽 Excel/CSV 到这里"}</strong>
           <span>上传后会自动进入看板</span>
-          <button className="btn btn-primary" onClick={() => fileRef.current?.click()} disabled={importing || !!job}>
-            {importing ? <RefreshCw className="spin" size={16} /> : <UploadCloud size={16} />}
-            {importing ? "导入中..." : "选择账单文件"}
-          </button>
+          {!job && (
+            <button className="btn btn-primary" onClick={() => fileRef.current?.click()} disabled={importing}>
+              {importing ? <RefreshCw className="spin" size={16} /> : <UploadCloud size={16} />}
+              {importing ? "导入中..." : "选择账单文件"}
+            </button>
+          )}
           {result && (
             <div className="upload-result">
               <CheckCircle2 size={16} />

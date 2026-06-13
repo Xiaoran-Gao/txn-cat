@@ -1,7 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  Cat,
   ChevronsLeft,
   FolderTree,
   LayoutDashboard,
@@ -85,10 +84,9 @@ export default function Layout({ children }: { children: ReactNode }) {
     <div className={`app-layout ${collapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <div className="brand-mark"><Cat size={21} /></div>
+          <img className="brand-mark" src="/txncatai_app_icon_exact.svg" alt="TxnCatAI" />
           <div className="brand-copy">
             <strong>TxnCat<span>AI</span></strong>
-            <small>私人账本系统</small>
           </div>
         </div>
         <nav className="sidebar-nav">
