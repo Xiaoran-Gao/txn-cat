@@ -95,12 +95,37 @@ def read_csv_text(text: str, filename: str) -> pd.DataFrame:
     return df
 
 
+HEADER_TERMS = (
+    "交易日期", "日期", "date", "transaction date", "posting date", "记账日期", "交易时间",
+    "付款时间", "交易创建时间", "创建时间", "完成时间",
+    "交易说明", "交易描述", "description", "merchant", "商户名称", "交易对方", "摘要", "用途",
+    "商品", "商品名称", "交易类型", "备注",
+    "金额", "交易金额", "amount", "发生额", "人民币金额", "支出", "收入", "收/支", "收支",
+)
+
+COLUMN_CANDIDATES = {
+    "date_col": [
+        "交易日期", "日期", "date", "transaction date", "posting date", "记账日期",
+        "交易时间", "付款时间", "交易创建时间", "创建时间", "完成时间",
+    ],
+    "desc_col": [
+        "交易说明", "交易描述", "description", "merchant", "商户名称", "交易对方",
+        "摘要", "用途", "商品名称", "商品", "交易类型", "备注", "说明",
+    ],
+    "amount_col": ["金额", "交易金额", "amount", "发生额", "人民币金额", "交易额", "金额元"],
+    "expense_col": ["支出", "支出金额", "借方金额", "付款金额", "消费金额"],
+    "income_col": ["收入", "收入金额", "贷方金额", "收款金额", "入账金额"],
+    "direction_col": ["收/支", "收支", "收入/支出", "支出/收入", "资金流向", "借贷标志"],
+    "account_col": [
+        "账户", "账号", "卡号", "银行卡号", "交易账户", "付款账户", "收款账户",
+        "支付方式", "付款方式", "收款方式", "account", "card",
+    ],
+    "channel_col": ["支付渠道", "渠道", "交易渠道", "来源", "source", "channel"],
+    "platform_col": ["消费平台", "商户平台", "平台", "应用", "app", "platform"],
+}
+
+
 def detect_csv_header(lines: list[str]) -> tuple[int, str]:
-    header_terms = (
-        "交易日期", "日期", "date", "transaction date", "posting date", "记账日期", "交易时间",
-        "交易说明", "交易描述", "description", "merchant", "商户名称", "交易对方", "摘要", "用途",
-        "金额", "交易金额", "amount", "发生额", "人民币金额", "支出", "收入",
-    )
     best: tuple[int, str, int] | None = None
 
     for idx, line in enumerate(lines[:120]):
@@ -110,7 +135,7 @@ def detect_csv_header(lines: list[str]) -> tuple[int, str]:
             continue
 
         normalized = line.lower()
-        term_hits = sum(1 for term in header_terms if term.lower() in normalized)
+        term_hits = sum(1 for term in HEADER_TERMS if term.lower() in normalized)
         score = term_hits * 10 + delimiter_count
         if best is None or score > best[2]:
             best = (idx, delimiter, score)
@@ -126,6 +151,204 @@ def detect_csv_header(lines: list[str]) -> tuple[int, str]:
             return idx, delimiter
 
     raise ValueError("Could not find a transaction table in CSV")
+
+
+def read_excel_with_header_detection(file: BinaryIO, filename: str) -> pd.DataFrame:
+    """Read Excel exports that may include bank/account preamble rows."""
+    engine = "xlrd" if filename.lower().endswith(".xls") else "openpyxl"
+    try:
+        sheets = pd.read_excel(file, engine=engine, header=None, sheet_name=None)
+    except ImportError as exc:
+        raise ValueError("Reading .xls files requires xlrd. Please install backend requirements again.") from exc
+    except ValueError as exc:
+        if filename.lower().endswith(".xls"):
+            raise ValueError("Could not read .xls file. Please re-export as .xlsx or install xlrd support.") from exc
+        raise
+
+    raw = select_transaction_sheet(sheets)
+    if raw.empty:
+        raise ValueError("Excel file is empty")
+
+    header_idx = detect_excel_header(raw)
+    account_name = detect_account_from_preamble(excel_preamble_lines(raw, header_idx))
+    header = raw.iloc[header_idx].map(clean_excel_header)
+    df = raw.iloc[header_idx + 1:].copy()
+    df.columns = dedupe_columns(header)
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    df.attrs["account_name"] = account_name
+    df.attrs["payment_channel"] = detect_payment_channel(
+        filename,
+        "\n".join(excel_preamble_lines(raw, min(len(raw), header_idx + 20))),
+    )
+    return df
+
+
+def select_transaction_sheet(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    candidates = [(name, sheet, excel_header_candidate(sheet)) for name, sheet in sheets.items() if not sheet.empty]
+    if not candidates:
+        raise ValueError("Excel file is empty")
+
+    _, sheet, best = max(candidates, key=lambda item: item[2][1])
+    if best[2] < 2:
+        ai_sheet_name = ai_select_transaction_sheet(sheets)
+        if ai_sheet_name in sheets and not sheets[ai_sheet_name].empty:
+            return sheets[ai_sheet_name]
+    return sheet
+
+
+def clean_excel_header(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        return text[:-2]
+    return text
+
+
+def dedupe_columns(columns) -> list[str]:
+    seen: dict[str, int] = {}
+    result = []
+    for idx, col in enumerate(columns):
+        name = str(col).strip() or f"Unnamed {idx + 1}"
+        seen[name] = seen.get(name, 0) + 1
+        result.append(name if seen[name] == 1 else f"{name}.{seen[name] - 1}")
+    return result
+
+
+def excel_preamble_lines(raw: pd.DataFrame, end_idx: int) -> list[str]:
+    lines = []
+    for _, row in raw.iloc[:end_idx].iterrows():
+        values = [str(value).strip() for value in row if not pd.isna(value) and str(value).strip()]
+        if values:
+            lines.append("，".join(values))
+    return lines
+
+
+def detect_excel_header(raw: pd.DataFrame) -> int:
+    header_idx, _, semantic_hits = excel_header_candidate(raw)
+    if semantic_hits >= 2:
+        return header_idx
+
+    ai_header_idx = ai_detect_excel_header(raw)
+    if ai_header_idx is not None:
+        return ai_header_idx
+
+    for idx, row in raw.head(120).iterrows():
+        if row.notna().sum() >= 3:
+            return idx
+
+    raise ValueError("Could not find a transaction table in Excel")
+
+
+def excel_header_candidate(raw: pd.DataFrame) -> tuple[int, int, int]:
+    best: tuple[int, int, int] | None = None
+    for idx, row in raw.head(120).iterrows():
+        values = [str(value).strip() for value in row if not pd.isna(value) and str(value).strip()]
+        if len(values) < 2:
+            continue
+        normalized = " ".join(values).lower()
+        term_hits = sum(1 for term in HEADER_TERMS if term.lower() in normalized)
+        semantic_hits = semantic_header_hits(values)
+        score = semantic_hits * 20 + term_hits * 5 + len(values)
+        if best is None or score > best[1]:
+            best = (idx, score, semantic_hits)
+            if semantic_hits >= 3:
+                break
+
+    return best or (0, 0, 0)
+
+
+def normalize_column_name(value) -> str:
+    text = "" if pd.isna(value) else str(value).lower().strip()
+    return re.sub(r"[\s\u3000,，:：()（）【】\[\]{}<>《》/\\_\-.]+", "", text)
+
+
+def column_matches(col, candidates: list[str]) -> bool:
+    normalized_col = normalize_column_name(col)
+    if not normalized_col:
+        return False
+    for candidate in candidates:
+        normalized_candidate = normalize_column_name(candidate)
+        if not normalized_candidate:
+            continue
+        if normalized_col == normalized_candidate:
+            return True
+        if normalized_candidate in normalized_col:
+            return True
+    return False
+
+
+def semantic_header_hits(values: list[str]) -> int:
+    groups = ("date_col", "desc_col", "amount_col", "expense_col", "income_col", "direction_col")
+    hits = 0
+    for group in groups:
+        if any(column_matches(value, COLUMN_CANDIDATES[group]) for value in values):
+            hits += 1
+    return hits
+
+
+def ai_select_transaction_sheet(sheets: dict[str, pd.DataFrame]) -> str | None:
+    sheet_summaries = []
+    for name, sheet in sheets.items():
+        if sheet.empty:
+            continue
+        rows = excel_rows_for_llm(sheet, limit=12)
+        sheet_summaries.append({
+            "sheet_name": name,
+            "row_count": len(sheet),
+            "sample_rows": rows,
+        })
+
+    if not sheet_summaries:
+        return None
+
+    system_prompt = """你是账单 Excel 工作表识别助手。根据每个 sheet 的前几行，判断哪一个 sheet 最可能包含交易明细表。
+只返回 JSON，不要解释。字段：
+- sheet_name: 原始 sheet 名称或 null
+
+交易明细表通常包含日期/时间、交易对方/商户/商品/摘要、金额/收入/支出/收支方向等列。说明页、统计页、导出说明页不要选。"""
+    user_prompt = json.dumps({"sheets": sheet_summaries}, ensure_ascii=False)
+    result = call_ollama_json(system_prompt, user_prompt, timeout=20)
+    if not result:
+        return None
+
+    sheet_name = result.get("sheet_name")
+    return sheet_name if sheet_name in sheets else None
+
+
+def ai_detect_excel_header(raw: pd.DataFrame) -> int | None:
+    rows = excel_rows_for_llm(raw, limit=60)
+    if not rows:
+        return None
+
+    system_prompt = """你是账单 Excel 表头识别助手。根据前若干行判断交易明细表的表头行。
+只返回 JSON，不要解释。字段：
+- header_row_index: 表头所在行的 0-based 行号，找不到则为 null
+
+表头行通常包含日期/时间、交易对方/商户/商品/摘要、金额/收入/支出/收支方向等列名。
+不要把导出说明、账户信息、统计汇总、空行判断为表头。"""
+    user_prompt = json.dumps({"rows": rows}, ensure_ascii=False)
+    result = call_ollama_json(system_prompt, user_prompt, timeout=20)
+    if not result:
+        return None
+
+    header_idx = result.get("header_row_index")
+    if not isinstance(header_idx, int) or header_idx < 0 or header_idx >= len(raw):
+        return None
+
+    row = raw.iloc[header_idx]
+    if row.notna().sum() < 2:
+        return None
+    return header_idx
+
+
+def excel_rows_for_llm(raw: pd.DataFrame, limit: int) -> list[dict]:
+    rows = []
+    for idx, row in raw.head(limit).iterrows():
+        values = [str(value).strip() for value in row if not pd.isna(value) and str(value).strip()]
+        if values:
+            rows.append({"row_index": int(idx), "values": values[:20]})
+    return rows
 
 
 def detect_account_from_preamble(lines: list[str]) -> str | None:
@@ -223,8 +446,9 @@ def ai_detect_columns(df: pd.DataFrame, result: dict) -> dict:
     sample = df.head(8).astype(str).to_dict(orient="records")
     system_prompt = """你是账单表格列映射助手。根据列名和样本行判断每一列的语义。
 只返回 JSON，值必须是原始列名或 null。不要解释。
-字段：date_col, desc_col, amount_col, expense_col, income_col, account_col, channel_col, platform_col。
+字段：date_col, desc_col, amount_col, expense_col, income_col, direction_col, account_col, channel_col, platform_col。
 如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。
+direction_col 是金额方向列，例如“收/支”“收入/支出”“资金流向”，值可能是“收入”“支出”“+”“-”。
 account_col 是实际扣款或入账账户，例如银行卡、信用卡、微信零钱、支付宝余额、花呗，列名可能表达为收付款方式。
 channel_col 是支付通道或机构，例如微信、支付宝、银行渠道，不要和 account_col 混淆。
 platform_col 是消费平台或商户应用，例如美团、饿了么、滴滴、淘宝。"""
@@ -300,6 +524,7 @@ def refine_account_column(df: pd.DataFrame, result: dict) -> dict:
         result.get("amount_col"),
         result.get("expense_col"),
         result.get("income_col"),
+        result.get("direction_col"),
         result.get("platform_col"),
     }
     candidates = [col for col in df.columns if col not in excluded]
@@ -318,67 +543,20 @@ def refine_account_column(df: pd.DataFrame, result: dict) -> dict:
 
 def detect_columns(df: pd.DataFrame) -> dict:
     """Detect date, description, and amount columns by header name matching."""
-    date_candidates = ["交易日期", "日期", "date", "transaction date", "posting date", "记账日期", "交易时间"]
-    desc_candidates = ["交易说明", "交易描述", "description", "merchant", "商户名称", "交易对方", "摘要", "用途"]
-    amount_candidates = ["金额", "交易金额", "amount", "发生额", "人民币金额", "交易额"]
-    expense_candidates = ["支出", "支出金额", "借方金额", "付款金额"]
-    income_candidates = ["收入", "收入金额", "贷方金额", "收款金额"]
-    account_candidates = ["账户", "账号", "卡号", "银行卡号", "交易账户", "付款账户", "收款账户", "account", "card"]
-    channel_candidates = ["支付渠道", "渠道", "支付方式", "交易渠道", "来源", "source", "channel"]
-    platform_candidates = ["消费平台", "商户平台", "平台", "应用", "app", "platform"]
-
     result = {
         "date_col": None,
         "desc_col": None,
         "amount_col": None,
         "expense_col": None,
         "income_col": None,
+        "direction_col": None,
         "account_col": None,
         "channel_col": None,
         "platform_col": None,
     }
 
-    cols_lower = {str(col).lower().strip(): col for col in df.columns}
-
-    for cand in date_candidates:
-        if cand in cols_lower:
-            result["date_col"] = cols_lower[cand]
-            break
-
-    for cand in desc_candidates:
-        if cand in cols_lower:
-            result["desc_col"] = cols_lower[cand]
-            break
-
-    for cand in amount_candidates:
-        if cand in cols_lower:
-            result["amount_col"] = cols_lower[cand]
-            break
-
-    for cand in expense_candidates:
-        if cand in cols_lower:
-            result["expense_col"] = cols_lower[cand]
-            break
-
-    for cand in income_candidates:
-        if cand in cols_lower:
-            result["income_col"] = cols_lower[cand]
-            break
-
-    for cand in account_candidates:
-        if cand in cols_lower:
-            result["account_col"] = cols_lower[cand]
-            break
-
-    for cand in channel_candidates:
-        if cand in cols_lower:
-            result["channel_col"] = cols_lower[cand]
-            break
-
-    for cand in platform_candidates:
-        if cand in cols_lower:
-            result["platform_col"] = cols_lower[cand]
-            break
+    for key, candidates in COLUMN_CANDIDATES.items():
+        result[key] = first_matching_column(df, candidates)
 
     result = refine_account_column(df, ai_detect_columns(df, result))
 
@@ -391,6 +569,19 @@ def detect_columns(df: pd.DataFrame) -> dict:
         result["amount_col"] = df.columns[2]
 
     return result
+
+
+def first_matching_column(df: pd.DataFrame, candidates: list[str]):
+    exact_matches = {normalize_column_name(col): col for col in df.columns}
+    for candidate in candidates:
+        col = exact_matches.get(normalize_column_name(candidate))
+        if col is not None:
+            return col
+
+    for col in df.columns:
+        if column_matches(col, candidates):
+            return col
+    return None
 
 
 def parse_money(value) -> float | None:
@@ -411,7 +602,15 @@ def parse_money(value) -> float | None:
 
 def row_amount(row, cols: dict) -> float | None:
     if cols.get("amount_col") is not None:
-        return parse_money(row[cols["amount_col"]])
+        amount = parse_money(row[cols["amount_col"]])
+        if amount is None:
+            return None
+        direction = row_direction(row, cols)
+        if direction == "income":
+            return -abs(amount)
+        if direction == "expense":
+            return abs(amount)
+        return amount
 
     expense = parse_money(row[cols["expense_col"]]) if cols.get("expense_col") is not None else None
     income = parse_money(row[cols["income_col"]]) if cols.get("income_col") is not None else None
@@ -419,6 +618,25 @@ def row_amount(row, cols: dict) -> float | None:
         return abs(expense)
     if income is not None and income != 0:
         return -abs(income)
+    return None
+
+
+def row_direction(row, cols: dict) -> str | None:
+    if cols.get("direction_col") is None:
+        return None
+
+    value = row[cols["direction_col"]]
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip().lower()
+    if not text or text == "nan":
+        return None
+
+    if any(keyword in text for keyword in ("收入", "收款", "入账", "贷方", "credit")) or text.startswith("+"):
+        return "income"
+    if any(keyword in text for keyword in ("支出", "付款", "消费", "借方", "debit")) or text.startswith("-"):
+        return "expense"
     return None
 
 
@@ -457,8 +675,7 @@ def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
     if filename.lower().endswith(".csv"):
         df = read_csv_with_fallback(file, filename)
     else:
-        df = pd.read_excel(file, engine="openpyxl")
-        df.attrs["payment_channel"] = detect_payment_channel(filename, " ".join(map(str, df.columns)))
+        df = read_excel_with_header_detection(file, filename)
 
     cols = detect_columns(df)
 
@@ -498,7 +715,7 @@ def parse_columns_for_preview(file: BinaryIO, filename: str) -> dict:
     if filename.lower().endswith(".csv"):
         df = read_csv_with_fallback(file, filename)
     else:
-        df = pd.read_excel(file, engine="openpyxl")
+        df = read_excel_with_header_detection(file, filename)
 
     cols = detect_columns(df)
     return {
