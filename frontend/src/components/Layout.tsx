@@ -84,7 +84,7 @@ export default function Layout({ children }: { children: ReactNode }) {
     <div className={`app-layout ${collapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <img className="brand-mark" src="/txncatai_app_icon_exact.svg" alt="TxnCatAI" />
+          <img className="brand-mark" src="/favicon.svg" alt="TxnCatAI" />
           <div className="brand-copy">
             <strong>TxnCat<span>AI</span></strong>
           </div>
