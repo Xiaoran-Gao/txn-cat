@@ -61,7 +61,7 @@ export const api = {
     form.append("file", file);
     return upload<ImportResult>("/transactions/import", form);
   },
-  createTransaction: (data: { date: string; description: string; amount: number; account_name?: string | null; payment_channel?: string | null; merchant_platform?: string | null }) =>
+  createTransaction: (data: { date: string; description: string; product_info?: string | null; amount: number; account_name?: string | null; payment_channel?: string | null; merchant_platform?: string | null }) =>
     request<{ id: number; display_description: string }>("/transactions", { method: "POST", body: JSON.stringify(data) }),
   listTransactions: (params: QueryParams) => {
     const qs = new URLSearchParams();

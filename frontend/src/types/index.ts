@@ -4,6 +4,8 @@ export interface Transaction {
   raw_description: string;
   display_description: string;
   display_description_source: string | null;
+  raw_product_info: string | null;
+  display_product_info: string | null;
   amount: number;
   currency: string;
   account_name: string | null;
@@ -25,6 +27,8 @@ export interface TransactionUpdateInput {
   date?: string;
   raw_description?: string;
   display_description?: string;
+  raw_product_info?: string | null;
+  display_product_info?: string | null;
   amount?: number;
   account_name?: string | null;
   payment_channel?: string | null;

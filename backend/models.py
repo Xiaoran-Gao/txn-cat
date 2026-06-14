@@ -22,6 +22,7 @@ class CategoryOut(BaseModel):
 class TransactionCreate(BaseModel):
     date: date
     description: str
+    product_info: Optional[str] = None
     amount: float
     currency: str = "CNY"
     account_name: Optional[str] = None
@@ -33,6 +34,8 @@ class TransactionUpdate(BaseModel):
     date: Optional[date] = None
     raw_description: Optional[str] = None
     display_description: Optional[str] = None
+    raw_product_info: Optional[str] = None
+    display_product_info: Optional[str] = None
     amount: Optional[float] = None
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
@@ -47,6 +50,8 @@ class TransactionOut(BaseModel):
     raw_description: str
     display_description: str
     display_description_source: Optional[str] = None
+    raw_product_info: Optional[str] = None
+    display_product_info: Optional[str] = None
     amount: float
     currency: str
     account_name: Optional[str] = None

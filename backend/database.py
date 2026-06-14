@@ -44,6 +44,8 @@ def init_db():
             raw_description TEXT NOT NULL,
             display_description TEXT NOT NULL,
             display_description_source TEXT DEFAULT 'rule',
+            raw_product_info TEXT,
+            display_product_info TEXT,
             amount REAL NOT NULL,
             currency TEXT DEFAULT 'CNY',
             account_name TEXT,
@@ -98,6 +100,10 @@ def init_db():
                    SET display_description_source = 'rule'
                    WHERE display_description_source IS NULL OR display_description_source = ''"""
             )
+        if "raw_product_info" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN raw_product_info TEXT")
+        if "display_product_info" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN display_product_info TEXT")
         if "classification_confidence" not in columns:
             conn.execute("ALTER TABLE transactions ADD COLUMN classification_confidence INTEGER")
         if "classification_review_status" not in columns:

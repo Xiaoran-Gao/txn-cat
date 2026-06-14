@@ -40,3 +40,33 @@ def normalize_description(raw: str) -> str:
     cleaned = re.sub(r"[,，。、\s\-—]+$", "", cleaned)
 
     return cleaned or raw
+
+
+def normalize_product_info(raw: str | None) -> str | None:
+    """Clean product/order detail while preserving the useful purchase signal."""
+    if raw is None:
+        return None
+
+    text = str(raw).strip()
+    if not text or text.lower() == "nan":
+        return None
+
+    cleaned = text
+    product_noise = [
+        r"订单号[:：]?\s*[\w\-]+",
+        r"交易单号[:：]?\s*[\w\-]+",
+        r"流水号[:：]?\s*[\w\-]+",
+        r"\b\d{10,}\b",
+        r"\d{4}-\d{1,2}-\d{1,2}",
+        r"\d{1,2}月\d{1,2}日",
+        r"\d{1,2}:\d{2}(?::\d{2})?",
+        r"\s+",
+    ]
+    for pattern in product_noise:
+        cleaned = re.sub(pattern, " ", cleaned)
+
+    cleaned = re.sub(r"^[,，。、\s\-—:：]+", "", cleaned)
+    cleaned = re.sub(r"[,，。、\s\-—:：]+$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    return cleaned or None

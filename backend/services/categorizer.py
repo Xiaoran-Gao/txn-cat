@@ -4,6 +4,7 @@ import time
 import urllib.request
 from urllib.error import HTTPError, URLError
 import ollama
+from difflib import SequenceMatcher
 from functools import lru_cache
 from threading import Lock
 from config import (
@@ -20,8 +21,9 @@ from config import (
 from database import db_connection
 
 _OLLAMA_CALL_LOCK = Lock()
+PRODUCT_GROUP_SIMILARITY_THRESHOLD = 0.6
 
-UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述和金额，生成适合账本展示的交易描述并完成交易分类。
+UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述、商品/服务信息和金额，生成适合账本展示的交易描述并完成交易分类。
 
 分类表：
 {category_choices}
@@ -33,7 +35,8 @@ UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据
 规则：
 - display_description 输出清洗后的交易描述，不要解释。它要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
 - 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
-- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
+- 商品/服务信息是判断用途的重要证据，优先级高于平台名。比如“美团 + 外卖/餐品”应归餐饮美食，不要因为美团也可订酒店/旅行而归旅行出行。
+- 只有原始描述或商品/服务信息明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
 - 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
 - subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
@@ -153,6 +156,15 @@ def _clean_confidence(value) -> int | None:
     except (TypeError, ValueError):
         return None
     return max(0, min(100, confidence))
+
+
+def _row_get(row, key: str, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
 
 
 def _clamp_batch_size(value: int, default: int, minimum: int, maximum: int) -> int:
@@ -386,7 +398,54 @@ def _find_refund_candidates(description: str, amount: float) -> str:
 # Workflow Orchestrator
 # ──────────────────────────────────────────────
 
-def categorize_transaction(description: str, amount: float, raw_description: str | None = None) -> dict:
+def _llm_item_from_row(row) -> dict:
+    item = {
+        "id": row["id"],
+        "description": row["display_description"] or row["raw_description"],
+        "raw_description": row["raw_description"],
+        "amount": row["amount"],
+    }
+    if _row_get(row, "merchant_platform"):
+        item["merchant_platform"] = _row_get(row, "merchant_platform")
+    if _row_get(row, "display_product_info") or _row_get(row, "raw_product_info"):
+        item["product_info"] = _row_get(row, "display_product_info") or _row_get(row, "raw_product_info")
+        item["raw_product_info"] = _row_get(row, "raw_product_info")
+    if refund_context := _find_refund_candidates(row["raw_description"], row["amount"]):
+        item["refund_context"] = refund_context
+    return item
+
+
+def _single_user_prompt(
+    description: str,
+    amount: float,
+    raw_description: str | None = None,
+    raw_product_info: str | None = None,
+    display_product_info: str | None = None,
+    merchant_platform: str | None = None,
+) -> str:
+    lines = [
+        f'交易描述："{description}"',
+        f'原始描述："{raw_description or description}"',
+    ]
+    if merchant_platform:
+        lines.append(f'消费平台："{merchant_platform}"')
+    product_info = display_product_info or raw_product_info
+    if product_info:
+        lines.append(f'商品/服务信息："{product_info}"')
+    if raw_product_info and raw_product_info != product_info:
+        lines.append(f'原始商品/服务信息："{raw_product_info}"')
+    lines.append(f"交易金额：{amount}")
+    return "\n".join(lines)
+
+
+def categorize_transaction(
+    description: str,
+    amount: float,
+    raw_description: str | None = None,
+    raw_product_info: str | None = None,
+    display_product_info: str | None = None,
+    merchant_platform: str | None = None,
+) -> dict:
     """Classify one transaction with a single Ollama call."""
     category_choices = _build_category_choices()
     corrections = _build_corrections()
@@ -400,7 +459,14 @@ def categorize_transaction(description: str, amount: float, raw_description: str
     try:
         content = _call_llm(
             system_prompt,
-            f'交易描述："{description}"\n原始描述："{raw_description or description}"\n交易金额：{amount}',
+            _single_user_prompt(
+                description,
+                amount,
+                raw_description,
+                raw_product_info=raw_product_info,
+                display_product_info=display_product_info,
+                merchant_platform=merchant_platform,
+            ),
             temperature=0,
             num_predict=96,
             json_mode=True,
@@ -446,6 +512,9 @@ def categorize_transaction(description: str, amount: float, raw_description: str
                 "id": 0,
                 "display_description": description,
                 "raw_description": raw_description or description,
+                "raw_product_info": raw_product_info,
+                "display_product_info": display_product_info,
+                "merchant_platform": merchant_platform,
                 "amount": amount,
             }],
             [final_result],
@@ -489,7 +558,7 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
 
     with db_connection() as conn:
         rows = conn.execute(
-            """SELECT id, display_description, display_description_source, raw_description, amount
+            """SELECT id, display_description, display_description_source, raw_description, raw_product_info, display_product_info, merchant_platform, amount
                FROM transactions
                WHERE id IN ({})""".format(",".join("?" for _ in txn_ids)),
             txn_ids,
@@ -503,7 +572,7 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
         chunk_group_count = len(chunk)
         emit_progress(
             categorized + failed,
-            f"正在调用 LLM 分类 {start + 1}-{start + chunk_group_count}/{len(representative_rows)} 个去重商户",
+            f"正在调用 LLM 分类 {start + 1}-{start + chunk_group_count}/{len(representative_rows)} 个去重交易线索",
         )
         try:
             results = categorize_many_with_llm(chunk, llm_context=llm_context)
@@ -641,14 +710,58 @@ def _amount_direction(amount) -> str:
 
 
 def _group_rows_for_classification(rows) -> list[dict]:
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[tuple[str, str], list[dict]] = {}
     for row in rows:
         description = (row["display_description"] or row["raw_description"] or "").strip()
-        key = (description, _amount_direction(row["amount"]))
-        if key not in grouped:
-            grouped[key] = {"representative": row, "rows": []}
-        grouped[key]["rows"].append(row)
-    return list(grouped.values())
+        bucket_key = (description, _amount_direction(row["amount"]))
+        product_key = _product_group_key(row)
+        bucket = grouped.setdefault(bucket_key, [])
+        group = _find_similar_product_group(bucket, product_key)
+        if group is None:
+            bucket.append({"representative": row, "rows": [row], "product_key": product_key})
+        else:
+            group["rows"].append(row)
+
+    return [
+        {"representative": group["representative"], "rows": group["rows"]}
+        for bucket in grouped.values()
+        for group in bucket
+    ]
+
+
+def _find_similar_product_group(groups: list[dict], product_key: str) -> dict | None:
+    for group in groups:
+        if _product_keys_similar(group["product_key"], product_key):
+            return group
+    return None
+
+
+def _product_keys_similar(left: str, right: str) -> bool:
+    if not left and not right:
+        return True
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if len(left) < 4 or len(right) < 4:
+        return False
+    return SequenceMatcher(None, left, right).ratio() >= PRODUCT_GROUP_SIMILARITY_THRESHOLD
+
+
+def _product_group_key(row) -> str:
+    product = (row["display_product_info"] or row["raw_product_info"] or "").strip()
+    if not product:
+        return ""
+
+    text = product.lower()
+    text = re.sub(r"(订单号|交易单号|流水号|商户订单号|支付单号)[:：]?\s*[\w\-]+", " ", text)
+    text = re.sub(r"\d{1,2}月\d{1,2}日", " ", text)
+    text = re.sub(r"\d{4}-\d{1,2}-\d{1,2}", " ", text)
+    text = re.sub(r"\d{1,2}:\d{2}(?::\d{2})?", " ", text)
+    text = re.sub(r"1\d{10}", " ", text)
+    text = re.sub(r"\d+", " ", text)
+    text = re.sub(r"[\s,，。、:：;；\-—_]+", " ", text).strip()
+    return text[:40]
 
 
 def _split_valid_batch_results(rows, results: list[dict]) -> tuple[list[dict], list]:
@@ -723,6 +836,9 @@ def review_classification_results(
             "id": result["id"],
             "description": row["display_description"] or row["raw_description"],
             "raw_description": row["raw_description"],
+            "merchant_platform": _row_get(row, "merchant_platform"),
+            "product_info": _row_get(row, "display_product_info") or _row_get(row, "raw_product_info"),
+            "raw_product_info": _row_get(row, "raw_product_info"),
             "amount": row["amount"],
             "display_description": result.get("display_description"),
             "category_id": result.get("category_id"),
@@ -745,6 +861,7 @@ def review_classification_results(
 
 规则：
 - 每个输入 id 必须返回一条结果。
+- 商品/服务信息是判断用途的重要证据，优先级高于平台名；例如“美团 + 外卖/餐品”应归餐饮美食，不应归旅行出行。
 - 如果候选分类合理，approved=true，并返回原 category_id/subcategory_id。
 - 如果候选分类不合理，approved=false，并返回修正后的 category_id/subcategory_id。
 - category_id 必须选择一级分类 ID；subcategory_id 必须属于该一级分类，不能编造 ID。
@@ -804,24 +921,12 @@ JSON 格式：
 def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool = False) -> list[dict]:
     category_choices = (llm_context or {}).get("category_choices") or _build_category_choices()
     corrections = (llm_context or {}).get("corrections") or _build_corrections()
-    items = [
-        {
-            "id": r["id"],
-            "description": r["display_description"] or r["raw_description"],
-            "amount": r["amount"],
-            **(
-                {"refund_context": refund_context}
-                if (refund_context := _find_refund_candidates(r["raw_description"], r["amount"]))
-                else {}
-            ),
-        }
-        for r in rows
-    ]
+    items = [_llm_item_from_row(dict(r)) for r in rows]
     strict_rules = """
 - 这是修复批次：必须只处理输入里给出的 id，不能遗漏任何一条。
 - 如果上次结果无法确定，请重新用 LLM 判断；不要编造不存在的分类 ID。
 """ if strict else ""
-    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述和金额，输出清洗后的交易描述、一级分类ID、二级分类ID、置信度。
+    system_prompt = f"""你是一个本地账单批量分类助手。根据每条交易描述、商品/服务信息和金额，输出清洗后的交易描述、一级分类ID、二级分类ID、置信度。
 
 分类表：
 {category_choices}
@@ -833,7 +938,8 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
 - 每个输入 id 必须返回一条结果。
 - display_description 要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
 - 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
-- 只有原始描述明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
+- 商品/服务信息是判断用途的重要证据，优先级高于平台名。比如“美团 + 外卖/餐品”应归餐饮美食，不要因为美团也可订酒店/旅行而归旅行出行。
+- 只有原始描述或商品/服务信息明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
 - 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
 - subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。

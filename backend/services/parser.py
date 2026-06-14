@@ -110,7 +110,11 @@ COLUMN_CANDIDATES = {
     ],
     "desc_col": [
         "交易说明", "交易描述", "description", "merchant", "商户名称", "交易对方",
-        "摘要", "用途", "商品名称", "商品", "交易类型", "备注", "说明",
+        "摘要", "用途", "交易类型", "说明",
+    ],
+    "product_col": [
+        "商品信息", "商品名称", "商品", "商品说明", "订单信息", "订单详情", "购买商品",
+        "服务内容", "项目", "备注", "附言", "用途说明", "product", "item", "goods",
     ],
     "amount_col": ["金额", "交易金额", "amount", "发生额", "人民币金额", "交易额", "金额元"],
     "expense_col": ["支出", "支出金额", "借方金额", "付款金额", "消费金额"],
@@ -279,7 +283,7 @@ def column_matches(col, candidates: list[str]) -> bool:
 
 
 def semantic_header_hits(values: list[str]) -> int:
-    groups = ("date_col", "desc_col", "amount_col", "expense_col", "income_col", "direction_col")
+    groups = ("date_col", "desc_col", "product_col", "amount_col", "expense_col", "income_col", "direction_col")
     hits = 0
     for group in groups:
         if any(column_matches(value, COLUMN_CANDIDATES[group]) for value in values):
@@ -446,9 +450,11 @@ def ai_detect_columns(df: pd.DataFrame, result: dict) -> dict:
     sample = df.head(8).astype(str).to_dict(orient="records")
     system_prompt = """你是账单表格列映射助手。根据列名和样本行判断每一列的语义。
 只返回 JSON，值必须是原始列名或 null。不要解释。
-字段：date_col, desc_col, amount_col, expense_col, income_col, direction_col, account_col, channel_col, platform_col。
+字段：date_col, desc_col, product_col, amount_col, expense_col, income_col, direction_col, account_col, channel_col, platform_col。
 如果金额是单列正负数，用 amount_col；如果支出/收入分列，用 expense_col/income_col。
 direction_col 是金额方向列，例如“收/支”“收入/支出”“资金流向”，值可能是“收入”“支出”“+”“-”。
+desc_col 是商户、交易对方、交易说明这类主描述。
+product_col 是商品、商品名称、订单信息、服务内容、备注中更具体说明买了什么/用了什么服务的列。不要和 desc_col 选同一列，除非只有一个相关文本列。
 account_col 是实际扣款或入账账户，例如银行卡、信用卡、微信零钱、支付宝余额、花呗，列名可能表达为收付款方式。
 channel_col 是支付通道或机构，例如微信、支付宝、银行渠道，不要和 account_col 混淆。
 platform_col 是消费平台或商户应用，例如美团、饿了么、滴滴、淘宝。"""
@@ -521,6 +527,7 @@ def refine_account_column(df: pd.DataFrame, result: dict) -> dict:
     excluded = {
         result.get("date_col"),
         result.get("desc_col"),
+        result.get("product_col"),
         result.get("amount_col"),
         result.get("expense_col"),
         result.get("income_col"),
@@ -546,6 +553,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
     result = {
         "date_col": None,
         "desc_col": None,
+        "product_col": None,
         "amount_col": None,
         "expense_col": None,
         "income_col": None,
@@ -565,6 +573,10 @@ def detect_columns(df: pd.DataFrame) -> dict:
         result["date_col"] = df.columns[0]
     if result["desc_col"] is None and len(df.columns) > 1:
         result["desc_col"] = df.columns[1]
+    if result["desc_col"] is None and result["product_col"] is not None:
+        result["desc_col"] = result["product_col"]
+    if result["product_col"] == result["desc_col"]:
+        result["product_col"] = None
     if result["amount_col"] is None and result["expense_col"] is None and result["income_col"] is None and len(df.columns) > 2:
         result["amount_col"] = df.columns[2]
 
@@ -670,6 +682,18 @@ def row_platform(row, cols: dict, desc: str) -> str | None:
     return detect_merchant_platform(desc)
 
 
+def row_text(row, col) -> str | None:
+    if col is None:
+        return None
+    value = row[col]
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
+
 def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
     """Parse an Excel or CSV file and return a list of transaction dicts."""
     if filename.lower().endswith(".csv"):
@@ -689,11 +713,16 @@ def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
     transactions = []
     for _, row in df.iterrows():
         date_val = row[cols["date_col"]]
-        desc_val = str(row[cols["desc_col"]]).strip()
+        desc_val = row_text(row, cols["desc_col"]) or ""
+        product_val = row_text(row, cols.get("product_col"))
         amount_val = row_amount(row, cols)
         account_val = row_account(row, cols, account_fallback)
         channel_val = row_channel(row, cols, channel_fallback)
-        platform_val = row_platform(row, cols, desc_val)
+        platform_val = row_platform(
+            row,
+            cols,
+            " ".join(value for value in (desc_val, product_val or "") if value),
+        )
 
         if pd.isna(date_val) or not desc_val or amount_val is None or pd.isna(amount_val):
             continue
@@ -701,6 +730,7 @@ def parse_excel(file: BinaryIO, filename: str) -> list[dict]:
         transactions.append({
             "date": str(date_val),
             "description": desc_val,
+            "product_info": product_val,
             "amount": amount_val,
             "account_name": account_val,
             "payment_channel": channel_val,

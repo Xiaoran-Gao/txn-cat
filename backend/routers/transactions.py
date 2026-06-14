@@ -5,7 +5,7 @@ from models import (
     BulkUpdate, BulkDelete, ImportResult, CategorizeResult, ClassificationJobOut,
 )
 from services.parser import parse_excel
-from services.normalizer import normalize_description
+from services.normalizer import normalize_description, normalize_product_info
 
 router = APIRouter()
 
@@ -30,10 +30,15 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
         for txn in transactions:
             try:
                 display_description = normalize_description(txn["description"])
+                raw_product_info = txn.get("product_info")
+                display_product_info = normalize_product_info(raw_product_info)
                 existing = conn.execute(
                     """SELECT id, is_categorized FROM transactions
-                       WHERE date = ? AND raw_description = ? AND amount = ?""",
-                    (txn["date"], txn["description"], txn["amount"]),
+                       WHERE date = ?
+                         AND raw_description = ?
+                         AND amount = ?
+                         AND COALESCE(raw_product_info, '') = COALESCE(?, '')""",
+                    (txn["date"], txn["description"], txn["amount"], raw_product_info),
                 ).fetchone()
                 if existing:
                     if not existing["is_categorized"]:
@@ -43,13 +48,15 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
 
                 conn.execute(
                     """INSERT INTO transactions
-                       (date, raw_description, display_description, display_description_source, amount, account_name, payment_channel, merchant_platform)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (date, raw_description, display_description, display_description_source, raw_product_info, display_product_info, amount, account_name, payment_channel, merchant_platform)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         txn["date"],
                         txn["description"],
                         display_description,
                         "rule",
+                        raw_product_info,
+                        display_product_info,
                         txn["amount"],
                         txn.get("account_name"),
                         txn.get("payment_channel"),
@@ -85,15 +92,18 @@ def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = Fi
 @router.post("")
 def create_transaction(txn: TransactionCreate):
     display_description = normalize_description(txn.description)
+    display_product_info = normalize_product_info(txn.product_info)
     with db_connection() as conn:
         cur = conn.execute(
             """INSERT INTO transactions
-               (date, raw_description, display_description, display_description_source, amount, currency, account_name, payment_channel, merchant_platform, source)
-               VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, ?, 'manual')""",
+               (date, raw_description, display_description, display_description_source, raw_product_info, display_product_info, amount, currency, account_name, payment_channel, merchant_platform, source)
+               VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, ?, ?, ?, 'manual')""",
             (
                 txn.date.isoformat(),
                 txn.description,
                 display_description,
+                txn.product_info,
+                display_product_info,
                 txn.amount,
                 txn.currency,
                 txn.account_name,
@@ -139,8 +149,8 @@ def list_transactions(
         conditions.append("t.subcategory_id = ?")
         params.append(subcategory_id)
     if search:
-        conditions.append("(t.raw_description LIKE ? OR t.display_description LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%"])
+        conditions.append("(t.raw_description LIKE ? OR t.display_description LIKE ? OR t.raw_product_info LIKE ? OR t.display_product_info LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"])
     if is_categorized is not None:
         conditions.append("t.is_categorized = ?")
         params.append(1 if is_categorized else 0)
@@ -204,7 +214,6 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
             fields.append("date = ?")
             params.append(update.date.isoformat())
         if update.raw_description is not None:
-            from services.normalizer import normalize_description
             fields.append("raw_description = ?")
             params.append(update.raw_description)
             fields.append("display_description = ?")
@@ -227,6 +236,14 @@ def update_transaction(txn_id: int, update: TransactionUpdate):
         if "merchant_platform" in update_fields:
             fields.append("merchant_platform = ?")
             params.append(update.merchant_platform)
+        if "raw_product_info" in update_fields:
+            fields.append("raw_product_info = ?")
+            params.append(update.raw_product_info)
+            fields.append("display_product_info = ?")
+            params.append(normalize_product_info(update.raw_product_info))
+        if "display_product_info" in update_fields:
+            fields.append("display_product_info = ?")
+            params.append(normalize_product_info(update.display_product_info))
         if update.category_id is not None:
             fields.append("category_id = ?")
             params.append(update.category_id)
@@ -325,7 +342,7 @@ def categorize_single(txn_id: int):
 
     with db_connection() as conn:
         txn = conn.execute(
-            """SELECT display_description, display_description_source, raw_description, amount
+            """SELECT display_description, display_description_source, raw_description, raw_product_info, display_product_info, merchant_platform, amount
                FROM transactions
                WHERE id = ?""",
             (txn_id,),
@@ -333,7 +350,14 @@ def categorize_single(txn_id: int):
         if not txn:
             raise HTTPException(404, "Transaction not found")
 
-    result = categorize_transaction(txn["display_description"], txn["amount"], txn["raw_description"])
+    result = categorize_transaction(
+        txn["display_description"],
+        txn["amount"],
+        txn["raw_description"],
+        raw_product_info=txn["raw_product_info"],
+        display_product_info=txn["display_product_info"],
+        merchant_platform=txn["merchant_platform"],
+    )
     if result.get("category_id"):
         display_description = (
             txn["display_description"]
