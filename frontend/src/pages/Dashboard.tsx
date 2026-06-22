@@ -5,12 +5,10 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Line,
-  LineChart,
+  LabelList,
   Pie,
   PieChart,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
@@ -46,6 +44,7 @@ type CategoryStat = {
   amount: number;
   count: number;
   sharePct: number;
+  countSharePct: number;
   momChangePct: number | null;
 };
 
@@ -69,6 +68,8 @@ type Anomaly = {
   account: string | null;
   reason: string;
 };
+
+type HeatmapDay = DayStat | null;
 
 type AnalyticsJson = {
   month: string;
@@ -118,7 +119,8 @@ type AnalyticsJson = {
   };
 };
 
-const CATEGORY_COLORS = ["#1f7aff", "#13b85f", "#ff8a1f", "#8f5cff", "#11c4e8", "#f04465", "#94a3b8"];
+const CATEGORY_COLORS = ["#1f7aff", "#70b5ff", "#a8d5ff", "#d6ebff", "#7d95b8", "#ffad6f", "#94a3b8"];
+const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
 async function fetchAllTransactions() {
   const perPage = 200;
@@ -148,6 +150,12 @@ function daysInMonth(month: string) {
 function prevMonthKey(month: string) {
   const [year, m] = month.split("-").map(Number);
   const date = new Date(year, m - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function shiftMonthKey(month: string, offset: number) {
+  const [year, m] = month.split("-").map(Number);
+  const date = new Date(year, m - 1 + offset, 1);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
@@ -227,6 +235,16 @@ function getDateMs(date: string) {
   return new Date(`${date}T00:00:00`).getTime();
 }
 
+function sundayBasedWeekday(date: string) {
+  return new Date(`${date}T00:00:00`).getDay();
+}
+
+function formatHeatmapValue(day: DayStat, mode: HeatmapMode) {
+  if (mode === "count") return `${day.count} 笔`;
+  if (!day.amount) return "0";
+  return Math.round(day.amount).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+}
+
 function fallbackSummary(data: AnalyticsJson) {
   if (!data.total_spending) return "暂无足够消费数据。导入本月账单后，TxnCat 会基于结构化统计生成月度总结。";
   const topCategory = data.top_categories[0];
@@ -252,7 +270,9 @@ export default function Dashboard() {
   const [job, setJob] = useState<ClassificationJob | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [heatmapMode, setHeatmapMode] = useState<HeatmapMode>("amount");
+  const [monthlyTrendMode, setMonthlyTrendMode] = useState<HeatmapMode>("amount");
+  const [categoryMode, setCategoryMode] = useState<HeatmapMode>("amount");
+  const [channelMode, setChannelMode] = useState<HeatmapMode>("amount");
   const [llmSummary, setLlmSummary] = useState("");
   const [llmStatus, setLlmStatus] = useState<"idle" | "loading" | "ready" | "fallback">("idle");
 
@@ -361,16 +381,9 @@ export default function Dashboard() {
   }, [txns]);
 
   const latestMonth = availableMonths[0]?.month || currentMonthKey();
-  const activeMonth = selectedMonth || latestMonth;
-
-  useEffect(() => {
-    if (!availableMonths.length) {
-      setSelectedMonth(null);
-      return;
-    }
-    if (selectedMonth && availableMonths.some((item) => item.month === selectedMonth)) return;
-    setSelectedMonth(availableMonths[0].month);
-  }, [availableMonths, selectedMonth]);
+  const activeMonth = selectedMonth && availableMonths.some((item) => item.month === selectedMonth)
+    ? selectedMonth
+    : latestMonth;
 
   const analytics = useMemo(() => {
     const currentTxns = spendingOnly(txns).filter((txn) => monthKey(txn.date) === activeMonth);
@@ -378,6 +391,7 @@ export default function Dashboard() {
     const previousTxns = spendingOnly(txns).filter((txn) => monthKey(txn.date) === previousMonth);
     const totalSpend = currentTxns.reduce((sum, txn) => sum + txn.amount, 0);
     const previousSpend = previousTxns.reduce((sum, txn) => sum + txn.amount, 0);
+    const totalCount = currentTxns.length;
     const monthDays = daysInMonth(activeMonth);
     const dailyAverage = monthDays ? totalSpend / monthDays : 0;
     const avgTransaction = currentTxns.length ? totalSpend / currentTxns.length : 0;
@@ -405,13 +419,20 @@ export default function Dashboard() {
     const dailyStats = [...dayMap.values()];
     const maxDayAmount = Math.max(0, ...dailyStats.map((day) => day.amount));
     const maxDayCount = Math.max(0, ...dailyStats.map((day) => day.count));
+    const firstWeekday = sundayBasedWeekday(`${activeMonth}-01`);
+    const heatmapDays: HeatmapDay[] = [
+      ...Array.from({ length: firstWeekday }, () => null),
+      ...dailyStats,
+    ];
 
     const trend = dailyStats.map((day, index) => {
       const prevWindow = dailyStats.slice(Math.max(0, index - 6), index + 1);
+      const weekday = sundayBasedWeekday(day.date);
       return {
         date: `${day.day}日`,
         fullDate: day.date,
         amount: day.amount,
+        isMonday: weekday === 1,
         movingAverage: index >= 6 ? roundMoney(mean(prevWindow.map((item) => item.amount))) : null,
       };
     });
@@ -449,6 +470,7 @@ export default function Dashboard() {
           amount: roundMoney(value.amount),
           count: value.count,
           sharePct: totalSpend ? roundMoney((value.amount / totalSpend) * 100) : 0,
+          countSharePct: totalCount ? roundMoney((value.count / totalCount) * 100) : 0,
           momChangePct: previous > 0 ? roundMoney(((value.amount - previous) / previous) * 100) : null,
         };
       })
@@ -461,9 +483,10 @@ export default function Dashboard() {
         amount: acc.amount + item.amount,
         count: acc.count + item.count,
         sharePct: acc.sharePct + item.sharePct,
+        countSharePct: acc.countSharePct + item.countSharePct,
         momChangePct: null,
       }),
-      { name: "其他", amount: 0, count: 0, sharePct: 0, momChangePct: null } as CategoryStat,
+      { name: "其他", amount: 0, count: 0, sharePct: 0, countSharePct: 0, momChangePct: null } as CategoryStat,
     );
     const categoryPie = (otherCategory.amount > 0 ? [...topCategories, otherCategory] : topCategories).map((item, index) => ({
       ...item,
@@ -647,6 +670,7 @@ export default function Dashboard() {
       avgTransaction: roundMoney(avgTransaction),
       momChangePct,
       dailyStats,
+      heatmapDays,
       maxDayAmount,
       maxDayCount,
       trend: trendWithPrevious,
@@ -663,24 +687,25 @@ export default function Dashboard() {
     };
   }, [activeMonth, txns]);
 
+  const fallbackLlmSummary = useMemo(() => fallbackSummary(analytics.structuredJson), [analytics.structuredJson]);
+
   useEffect(() => {
-    if (!analytics.structuredJson.total_spending) {
-      setLlmSummary(fallbackSummary(analytics.structuredJson));
-      setLlmStatus("fallback");
-      return;
-    }
+    if (!analytics.structuredJson.total_spending) return;
     let active = true;
-    setLlmStatus("loading");
-    setLlmSummary(fallbackSummary(analytics.structuredJson));
+    Promise.resolve().then(() => {
+      if (!active) return;
+      setLlmStatus("loading");
+      setLlmSummary("");
+    });
     api.monthlySummary(analytics.structuredJson)
       .then((result: MonthlySummaryResult) => {
         if (!active) return;
-        setLlmSummary(result.summary || fallbackSummary(analytics.structuredJson));
+        setLlmSummary(result.summary || "");
         setLlmStatus(result.source === "llm" ? "ready" : "fallback");
       })
       .catch(() => {
         if (!active) return;
-        setLlmSummary(fallbackSummary(analytics.structuredJson));
+        setLlmSummary("");
         setLlmStatus("fallback");
       });
     return () => {
@@ -691,14 +716,70 @@ export default function Dashboard() {
   const progress = job?.total ? Math.round((job.processed / job.total) * 100) : 0;
   const hasSpendData = analytics.currentTxns.length > 0;
   const uncategorized = txns.filter((txn) => txn.amount > 0 && !txn.category_name).length;
+  const topCategory = analytics.categories[0];
+  const displayedLlmStatus = analytics.structuredJson.total_spending ? llmStatus : "fallback";
+  const displayedLlmSummary = llmSummary || fallbackLlmSummary;
+  const categoryRows = useMemo(() => {
+    return [...analytics.categories].sort((a, b) => categoryMode === "amount" ? b.amount - a.amount : b.count - a.count);
+  }, [analytics.categories, categoryMode]);
+  const categoryPieRows = useMemo(() => {
+    const topRows = categoryRows.slice(0, 6);
+    const otherRows = categoryRows.slice(6);
+    const rows = otherRows.length
+      ? [
+          ...topRows,
+          otherRows.reduce(
+            (acc, item) => ({
+              name: "其他",
+              amount: acc.amount + item.amount,
+              count: acc.count + item.count,
+              sharePct: acc.sharePct + item.sharePct,
+              countSharePct: acc.countSharePct + item.countSharePct,
+              momChangePct: null,
+            }),
+            { name: "其他", amount: 0, count: 0, sharePct: 0, countSharePct: 0, momChangePct: null } as CategoryStat,
+          ),
+        ]
+      : topRows;
+    return rows.map((item, index) => ({ ...item, color: CATEGORY_COLORS[index % CATEGORY_COLORS.length] }));
+  }, [categoryRows]);
+  const channelChartRows = useMemo(() => {
+    return [...analytics.channels]
+      .sort((a, b) => channelMode === "amount" ? b.amount - a.amount : b.count - a.count)
+      .slice(0, 6);
+  }, [analytics.channels, channelMode]);
+  const channelChartHeight = channelChartRows.length <= 1
+    ? 54
+    : channelChartRows.length === 2
+      ? 86
+      : Math.max(132, channelChartRows.length * 40);
+  const channelBarSize = channelChartRows.length <= 2 ? 24 : 28;
+  const monthlyTrend = useMemo(() => {
+    const byMonth = new Map(availableMonths.map((item) => [item.month, item]));
+    return Array.from({ length: 6 }, (_, index) => {
+      const month = shiftMonthKey(analytics.activeMonth, index - 5);
+      const existing = byMonth.get(month);
+      return {
+        month,
+        amount: existing?.amount || 0,
+        count: existing?.count || 0,
+        label: `${Number(month.slice(5, 7))}月`,
+      };
+    });
+  }, [analytics.activeMonth, availableMonths]);
 
   return (
     <div className="spending-dashboard">
-      <header className="dashboard-header">
-        <div>
+      <header className="dashboard-report-hero">
+        <div className="report-hero-copy">
           <span className="eyebrow"><CalendarDays size={15} /> {analytics.activeMonth}</span>
-          <h1>消费看板</h1>
-          <p>用代码完成统计、趋势和异常识别，再让本地 LLM 把结构化结果讲清楚。</p>
+          <h1>月度消费报告</h1>
+          <p>把本月账单整理成一张可读的消费报告：先看总结，再看趋势、分类和异常。</p>
+          <div className="report-hero-stats">
+            <span>当前采用日粒度趋势</span>
+            <span>{analytics.currentTxns.length} 笔支出</span>
+            <span>{analytics.categoryCoverageCount} 个分类</span>
+          </div>
         </div>
         <div className="dashboard-actions">
           <label className="month-switcher">
@@ -729,100 +810,165 @@ export default function Dashboard() {
             {categorizing ? "分类中" : "补全分类"}
           </button>
         </div>
+        <div className="report-hero-art" aria-hidden="true">
+          <div className="report-sun" />
+          <div className="report-card-illustration">
+            <span />
+            <strong>{formatCurrency(analytics.totalSpend)}</strong>
+            <em>{analytics.momChangePct === null ? "暂无上月对比" : `环比 ${formatPct(analytics.momChangePct)}`}</em>
+          </div>
+          <div className="report-coin one" />
+          <div className="report-coin two" />
+        </div>
       </header>
 
       {job && <ProgressBar job={job} progress={progress} />}
       {notice && <div className="upload-result">{notice}</div>}
       {error && <div className="upload-error">{error}</div>}
 
-      <section className="dashboard-section">
-        <SectionTitle title="消费总览" subtitle="我这个月一共花了多少钱？相比之前有没有变多？有没有异常？" />
-        <div className="overview-grid">
-          <Metric label="本月总消费" value={formatCurrency(analytics.totalSpend)} detail={`${analytics.currentTxns.length} 笔支出交易`} tone="blue" />
-          <Metric label="日均消费" value={formatCurrency(analytics.dailyAverage)} detail={`按 ${daysInMonth(analytics.activeMonth)} 天计算`} tone="green" />
-          <Metric label="平均单笔消费" value={formatCurrency(analytics.avgTransaction)} detail="代码汇总计算" tone="orange" />
-          <Metric label="覆盖分类数" value={`${analytics.categoryCoverageCount} 类`} detail="不含未分类" tone="plum" />
-          <Metric label="环比变化" value={analytics.momChangePct === null ? "暂无上月" : formatPct(analytics.momChangePct)} detail={analytics.momChangePct === null ? "上月数据不足" : "相对上月消费"} tone={analytics.momChangePct !== null && analytics.momChangePct > 0 ? "rose" : "green"} muted={analytics.momChangePct === null} />
-          <Metric label="异常交易" value={`${analytics.anomalies.length} 笔`} detail="基于规则检测" tone={analytics.anomalies.length ? "rose" : "green"} />
+      <section className="dashboard-section dashboard-priority-grid">
+        <div className="monthly-report-card">
+          <div className="monthly-report-top">
+            <div>
+              <span>{analytics.activeMonth}</span>
+              <strong>消费总览</strong>
+            </div>
+            <div className="report-mode-pill">日</div>
+          </div>
+          <div className="monthly-report-main">
+            <Metric label="本月总消费" value={formatCurrency(analytics.totalSpend)} detail={`${analytics.currentTxns.length} 笔支出交易`} tone="blue" />
+            <Metric label="环比变化" value={analytics.momChangePct === null ? "暂无上月" : formatPct(analytics.momChangePct)} detail={analytics.momChangePct === null ? "上月数据不足" : "相对上月消费"} tone={analytics.momChangePct !== null && analytics.momChangePct > 0 ? "rose" : "green"} muted={analytics.momChangePct === null} />
+            <Metric label="异常交易" value={`${analytics.anomalies.length} 笔`} detail="基于规则检测" tone={analytics.anomalies.length ? "rose" : "green"} />
+          </div>
+          <div className="report-mini-grid">
+            <Metric label="日均消费" value={formatCurrency(analytics.dailyAverage)} detail={`按 ${daysInMonth(analytics.activeMonth)} 天计算`} tone="green" />
+            <Metric label="平均单笔" value={formatCurrency(analytics.avgTransaction)} detail="本月支出均值" tone="orange" />
+            <Metric label="覆盖分类" value={`${analytics.categoryCoverageCount} 类`} detail={topCategory ? `最高：${topCategory.name}` : "不含未分类"} tone="plum" />
+          </div>
+        </div>
+
+        <div className="home-panel ai-summary-panel report-summary-panel">
+          <div className="panel-title">
+            <div><strong>AI 月度总结</strong><span>{displayedLlmStatus === "ready" ? "本地 LLM 生成" : displayedLlmStatus === "loading" ? "正在请求本地 LLM" : "结构化规则兜底"}</span></div>
+            <Brain size={19} />
+          </div>
+          <div className="summary-copy">{displayedLlmSummary}</div>
         </div>
       </section>
 
       <section className="dashboard-section">
-        <SectionTitle title="消费趋势" subtitle="看看你的消费是否集中在某几天，或者是否存在明显波动。" />
+        <SectionTitle
+          title="消费趋势"
+          subtitle="左侧看最近几个月变化，右侧看本月每天分布。"
+          action={<MetricToggle value={monthlyTrendMode} onChange={setMonthlyTrendMode} />}
+        />
         <div className="dashboard-two-col trend-layout">
-          <div className="home-panel">
+          <div className="home-panel report-chart-panel monthly-trend-panel">
             <div className="panel-title">
-              <div><strong>消费强度热力图</strong><span>每个格子代表一天</span></div>
-              <div className="segmented-control">
-                <button className={heatmapMode === "amount" ? "active" : ""} onClick={() => setHeatmapMode("amount")}>金额</button>
-                <button className={heatmapMode === "count" ? "active" : ""} onClick={() => setHeatmapMode("count")}>笔数</button>
+              <div>
+                <strong>{monthlyTrendMode === "amount" ? "月度消费金额趋势" : "月度消费笔数趋势"}</strong>
+                <span>最近 6 个月，缺失月份按 0 计算</span>
               </div>
             </div>
+            {monthlyTrend.length ? (
+              <ResponsiveContainer width="100%" height={274}>
+                <BarChart data={monthlyTrend}>
+                  <CartesianGrid stroke="#e5edf6" strokeDasharray="3 5" vertical={false} />
+                  <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                  <YAxis hide />
+                  <Bar
+                    dataKey={monthlyTrendMode}
+                    name={monthlyTrendMode === "amount" ? "月支出金额" : "月支出笔数"}
+                    radius={[14, 14, 14, 14]}
+                    fill="#8fc5ff"
+                    barSize={52}
+                    activeBar={{ fill: "#76b8ff", stroke: "#4d96eb", strokeWidth: 1 }}
+                  >
+                    <LabelList
+                      dataKey={monthlyTrendMode}
+                      position="top"
+                      formatter={(value) => {
+                        const metric = Number(value || 0);
+                        if (monthlyTrendMode === "count") return `${metric}笔`;
+                        return metric > 0 ? `¥${Math.round(metric).toLocaleString("zh-CN")}` : "¥0";
+                      }}
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState text="暂无月度消费趋势数据" />
+            )}
+          </div>
+
+          <div className="home-panel report-chart-panel heatmap-panel">
+            <div className="panel-title">
+              <div><strong>本月消费热力图</strong><span>按自然周排列，顶部区分星期</span></div>
+            </div>
             {hasSpendData ? (
-              <div className="spend-heatmap">
-                {analytics.dailyStats.map((day) => {
-                  const ratio = heatmapMode === "amount"
-                    ? (analytics.maxDayAmount ? day.amount / analytics.maxDayAmount : 0)
-                    : (analytics.maxDayCount ? day.count / analytics.maxDayCount : 0);
-                  const level = day.count === 0 ? 0 : Math.max(1, Math.ceil(ratio * 4));
-                  return (
-                    <div
-                      className={`heat-cell level-${level}`}
-                      key={day.date}
-                      title={`${day.date}\n当日总消费：${formatCurrency(day.amount)}\n当日消费笔数：${day.count}\n当日 Top 分类：${day.topCategory}\n当日最大单笔：${day.largest ? `${merchantOf(day.largest)} ${formatCurrency(day.largest.amount)}` : "无"}`}
-                    >
-                      <span>{day.day}</span>
-                    </div>
-                  );
-                })}
+              <div className="month-heatmap-shell">
+                <div className="month-heatmap-header">
+                  <div>
+                    <strong>{Number(analytics.activeMonth.slice(5, 7))}月</strong>
+                    <span>{analytics.activeMonth.slice(0, 4)}</span>
+                  </div>
+                  <em>{monthlyTrendMode === "amount" ? "每日支出金额" : "每日支出笔数"}</em>
+                </div>
+                <div className="weekday-row">
+                  {WEEKDAY_LABELS.map((label) => <span key={label}>{label}</span>)}
+                </div>
+                <div className="spend-heatmap">
+                  {analytics.heatmapDays.map((day, index) => {
+                    if (!day) return <div className="heat-cell empty" key={`empty-${index}`} />;
+                    const ratio = monthlyTrendMode === "amount"
+                      ? (analytics.maxDayAmount ? day.amount / analytics.maxDayAmount : 0)
+                      : (analytics.maxDayCount ? day.count / analytics.maxDayCount : 0);
+                    const level = day.count === 0 ? 0 : Math.max(1, Math.ceil(ratio * 4));
+                    return (
+                      <div
+                        className={`heat-cell level-${level}`}
+                        key={day.date}
+                      >
+                        <strong>{day.day}</strong>
+                        <span>{formatHeatmapValue(day, monthlyTrendMode)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             ) : (
               <EmptyState text="暂无本月消费热力数据" />
             )}
           </div>
-
-          <div className="home-panel">
-            <div className="panel-title"><div><strong>每日消费趋势</strong><span>包含 7 日移动平均</span></div></div>
-            {hasSpendData ? (
-              <ResponsiveContainer width="100%" height={274}>
-                <LineChart data={analytics.trend}>
-                  <CartesianGrid stroke="#edf2f7" vertical={false} />
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} minTickGap={12} />
-                  <YAxis hide />
-                  <Tooltip formatter={(value) => formatCurrency(Number(value))} labelFormatter={(_, payload) => payload?.[0]?.payload?.fullDate || ""} />
-                  <Line type="monotone" dataKey="amount" name="每日消费金额" stroke="#1f7aff" strokeWidth={2.4} dot={false} />
-                  <Line type="monotone" dataKey="movingAverage" name="7 日移动平均" stroke="#13b85f" strokeWidth={2.2} dot={false} connectNulls />
-                  {analytics.hasPreviousDaily && <Line type="monotone" dataKey="previousAmount" name="上月同期" stroke="#94a3b8" strokeWidth={1.8} strokeDasharray="4 4" dot={false} />}
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <EmptyState text="暂无每日消费趋势数据" />
-            )}
-          </div>
         </div>
       </section>
 
       <section className="dashboard-section">
-        <SectionTitle title="分类消费结构" subtitle="了解钱主要花在哪些类别，以及哪些类别增长最快。" />
+        <SectionTitle
+          title="分类消费结构"
+          subtitle="了解钱主要花在哪些类别，以及哪些类别增长最快。"
+          action={<MetricToggle value={categoryMode} onChange={setCategoryMode} />}
+        />
         <div className="dashboard-two-col category-layout-grid">
-          <div className="home-panel">
-            <div className="panel-title"><div><strong>分类占比</strong><span>Top 分类合并展示</span></div></div>
-            {analytics.categoryPie.length ? (
+          <div className="home-panel report-chart-panel category-donut-panel">
+            <div className="panel-title">
+              <div><strong>{categoryMode === "amount" ? "分类金额占比" : "分类笔数占比"}</strong><span>Top 分类合并展示</span></div>
+            </div>
+            {categoryPieRows.length ? (
               <div className="donut-layout">
                 <ResponsiveContainer width="42%" height={244}>
                   <PieChart>
-                    <Pie data={analytics.categoryPie} dataKey="amount" nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3}>
-                      {analytics.categoryPie.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
+                    <Pie data={categoryPieRows} dataKey={categoryMode} nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3}>
+                      {categoryPieRows.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
                     </Pie>
-                    <Tooltip formatter={(value, _, item) => [`${formatCurrency(Number(value))} · ${item.payload.sharePct.toFixed(1)}% · ${item.payload.count} 笔`, item.payload.name]} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="pie-legend">
-                  {analytics.categoryPie.map((item) => (
+                  {categoryPieRows.map((item) => (
                     <div key={item.name}>
                       <span style={{ background: item.color }} />
                       <strong>{item.name}</strong>
-                      <em>{item.sharePct.toFixed(1)}%</em>
+                      <em>{(categoryMode === "amount" ? item.sharePct : item.countSharePct).toFixed(1)}%</em>
                     </div>
                   ))}
                 </div>
@@ -832,18 +978,29 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="home-panel">
-            <div className="panel-title"><div><strong>分类金额排名</strong><span>金额、占比、笔数和环比</span></div></div>
-            {analytics.categories.length ? (
+          <div className="home-panel report-chart-panel category-rank-panel">
+            <div className="panel-title">
+              <div>
+                <strong>{categoryMode === "amount" ? "分类金额排名" : "分类笔数排名"}</strong>
+                <span>{categoryMode === "amount" ? "金额、占比和环比" : "笔数、占比和环比"}</span>
+              </div>
+            </div>
+            {categoryRows.length ? (
               <div className="rank-list">
-                {analytics.categories.slice(0, 8).map((item) => (
+                {categoryRows.slice(0, 8).map((item) => (
                   <div className="rank-row" key={item.name}>
                     <div>
                       <strong>{item.name}</strong>
-                      <span>{item.count} 笔 · {item.sharePct.toFixed(1)}%</span>
+                      <span>{formatCurrency(item.amount)} · {item.count} 笔</span>
                     </div>
-                    <div className="rank-bar"><span style={{ width: `${Math.min(100, item.sharePct)}%` }} /></div>
-                    <em className={item.momChangePct !== null && item.momChangePct < 0 ? "down" : ""}>{formatCurrency(item.amount)} · {item.momChangePct === null ? "无环比" : formatPct(item.momChangePct)}</em>
+                    <div className="rank-bar"><span style={{ width: `${Math.min(100, categoryMode === "amount" ? item.sharePct : item.countSharePct)}%` }} /></div>
+                    <div className="rank-value">
+                      <strong>{categoryMode === "amount" ? formatCurrency(item.amount) : `${item.count} 笔`}</strong>
+                      <span>{(categoryMode === "amount" ? item.sharePct : item.countSharePct).toFixed(1)}%</span>
+                      <span className={item.momChangePct === null ? "" : item.momChangePct >= 0 ? "up" : "down"}>
+                        {item.momChangePct === null ? "无环比" : formatPct(item.momChangePct)}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -866,24 +1023,38 @@ export default function Dashboard() {
 
       {(analytics.channels.length > 0 || analytics.accounts.length > 0) && (
         <section className="dashboard-section">
-          <SectionTitle title="支付渠道 / 账户偏好" subtitle="我习惯用哪些支付方式和账户？它们分别用于什么消费场景？" />
-          <div className="dashboard-two-col">
+          <SectionTitle
+            title="支付渠道 / 账户偏好"
+            subtitle="我习惯用哪些支付方式和账户？它们分别用于什么消费场景？"
+            action={analytics.channels.length > 0 ? <MetricToggle value={channelMode} onChange={setChannelMode} /> : undefined}
+          />
+          <div className="dashboard-two-col preference-detail-grid">
             {analytics.channels.length > 0 && (
-              <div className="home-panel">
-                <div className="panel-title"><div><strong>支付渠道消费分布</strong><span>金额与笔数</span></div></div>
-                <ResponsiveContainer width="100%" height={240}>
-                  <BarChart data={analytics.channels.slice(0, 6)} layout="vertical">
+              <div className="home-panel report-chart-panel channel-chart-card">
+                <div className="panel-title">
+                  <div><strong>{channelMode === "amount" ? "支付渠道金额分布" : "支付渠道笔数分布"}</strong><span>{channelMode === "amount" ? "按金额展示" : "按交易笔数展示"}</span></div>
+                </div>
+                <ResponsiveContainer width="100%" height={channelChartHeight}>
+                  <BarChart data={channelChartRows} layout="vertical" barCategoryGap="24%" margin={{ right: 72 }}>
                     <CartesianGrid stroke="#edf2f7" horizontal={false} />
                     <XAxis type="number" hide />
                     <YAxis dataKey="name" type="category" width={82} tickLine={false} axisLine={false} />
-                    <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                    <Bar dataKey="amount" fill="#1f7aff" radius={[0, 8, 8, 0]} />
+                    <Bar dataKey={channelMode} fill="#8fc5ff" radius={[0, 8, 8, 0]} barSize={channelBarSize} activeBar={false}>
+                      <LabelList
+                        dataKey={channelMode}
+                        position="right"
+                        formatter={(value) => {
+                          const metric = Number(value || 0);
+                          return channelMode === "amount" ? `¥${Math.round(metric).toLocaleString("zh-CN")}` : `${metric}笔`;
+                        }}
+                      />
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             )}
             {analytics.accounts.length > 0 && (
-              <div className="home-panel">
+              <div className="home-panel report-chart-panel">
                 <div className="panel-title"><div><strong>账户使用偏好</strong><span>账户 × 主要分类</span></div></div>
                 <div className="account-list">
                   {analytics.accounts.slice(0, 6).map((item) => (
@@ -922,23 +1093,6 @@ export default function Dashboard() {
         )}
       </section>
 
-      <section className="dashboard-section">
-        <SectionTitle title="AI 月度总结" subtitle="本地 LLM 只读取代码计算后的结构化 JSON，并把结果转成自然语言。" />
-        <div className="ai-summary-grid">
-          <div className="home-panel ai-summary-panel">
-            <div className="panel-title">
-              <div><strong>月度总结</strong><span>{llmStatus === "ready" ? "本地 LLM 生成" : llmStatus === "loading" ? "正在请求本地 LLM" : "结构化规则兜底"}</span></div>
-              <Brain size={19} />
-            </div>
-            <div className="summary-copy">{llmSummary}</div>
-          </div>
-          <div className="home-panel structured-json-panel">
-            <div className="panel-title"><div><strong>结构化月度分析 JSON</strong><span>LLM 输入，不含原始流水</span></div></div>
-            <pre>{JSON.stringify(analytics.structuredJson, null, 2)}</pre>
-          </div>
-        </div>
-      </section>
-
       <div className="dashboard-footer-actions">
         <Link className="wide-action" to="/transactions"><FileSpreadsheet size={16} />查看交易明细 <ArrowRight size={16} /></Link>
         <Link className="wide-action secondary" to="/query">继续用智能问答追问 <ArrowRight size={16} /></Link>
@@ -947,11 +1101,23 @@ export default function Dashboard() {
   );
 }
 
-function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) {
+function SectionTitle({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
   return (
     <div className="section-heading">
-      <h2>{title}</h2>
-      <p>{subtitle}</p>
+      <div>
+        <h2>{title}</h2>
+        <p>{subtitle}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function MetricToggle({ value, onChange }: { value: HeatmapMode; onChange: (value: HeatmapMode) => void }) {
+  return (
+    <div className="segmented-control section-metric-toggle">
+      <button className={value === "amount" ? "active" : ""} onClick={() => onChange("amount")}>金额</button>
+      <button className={value === "count" ? "active" : ""} onClick={() => onChange("count")}>笔数</button>
     </div>
   );
 }
@@ -972,7 +1138,7 @@ function EmptyState({ text }: { text: string }) {
 
 function TopList({ title, rows, mode, icon }: { title: string; rows: EntityStat[]; mode: "amount" | "count"; icon: ReactNode }) {
   return (
-    <div className="home-panel top-list-panel">
+    <div className="home-panel report-chart-panel top-list-panel">
       <div className="panel-title"><div><strong>{title}</strong><span>名称、主要分类、金额、笔数、占比</span></div>{icon}</div>
       {rows.length ? (
         <div className="entity-list">
