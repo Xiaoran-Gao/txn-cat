@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import type { ClassificationJob, ImportResult, MonthlySummaryResult, Transaction } from "../types";
+import { getClassificationProgress } from "../utils/classificationProgress";
 
 type HeatmapMode = "amount" | "count";
 
@@ -713,7 +714,7 @@ export default function Dashboard() {
     };
   }, [analytics.structuredJson]);
 
-  const progress = job?.total ? Math.round((job.processed / job.total) * 100) : 0;
+  const progress = job ? getClassificationProgress(job) : null;
   const hasSpendData = analytics.currentTxns.length > 0;
   const uncategorized = txns.filter((txn) => txn.amount > 0 && !txn.category_name).length;
   const topCategory = analytics.categories[0];
@@ -822,7 +823,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {job && <ProgressBar job={job} progress={progress} />}
+      {job && progress && <ProgressBar job={job} progress={progress} />}
       {notice && <div className="upload-result">{notice}</div>}
       {error && <div className="upload-error">{error}</div>}
 
@@ -1160,15 +1161,15 @@ function TopList({ title, rows, mode, icon }: { title: string; rows: EntityStat[
   );
 }
 
-function ProgressBar({ job, progress }: { job: ClassificationJob; progress: number }) {
+function ProgressBar({ job, progress }: { job: ClassificationJob; progress: ReturnType<typeof getClassificationProgress> }) {
   return (
     <div className="classification-progress">
       <div>
         <strong>{job.message}</strong>
-        <span>{job.processed}/{job.total} · 成功 {job.categorized} · 失败 {job.failed}</span>
+        <span>{progress.processed}/{progress.total} · 成功 {progress.categorized} · 失败 {progress.failed}</span>
       </div>
-      <div className={`progress-track ${job.status === "running" && job.processed < job.total ? "active" : ""}`}>
-        <span style={{ width: `${progress}%` }} />
+      <div className={`progress-track ${progress.isActive ? "active" : ""}`}>
+        <span style={{ width: `${progress.percent}%` }} />
       </div>
     </div>
   );

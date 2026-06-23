@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import type { ClassificationJob, ImportResult } from "../types";
+import { getClassificationProgress } from "../utils/classificationProgress";
 
 export default function Home() {
   const navigate = useNavigate();
@@ -112,7 +113,7 @@ export default function Home() {
     }
   };
 
-  const progress = job?.total ? Math.round((job.processed / job.total) * 100) : 0;
+  const progress = job ? getClassificationProgress(job) : null;
   const visibleChat = chatPreview.slice(0, activeChat + 1);
   const chatOffset = Math.max(0, visibleChat.length - 5) * 62;
 
@@ -214,7 +215,7 @@ export default function Home() {
               新增 {result.imported} 条，跳过重复 {result.skipped} 条
             </div>
           )}
-          {job && <ProgressBar job={job} progress={progress} />}
+          {job && progress && <ProgressBar job={job} progress={progress} />}
           {error && <div className="upload-error">{error}</div>}
         </div>
 
@@ -506,15 +507,15 @@ const chatPreview = [
   { from: "bot", text: "建议先看餐饮、购物和交通，三项合计比上月多 ¥1,236。" },
 ];
 
-function ProgressBar({ job, progress }: { job: ClassificationJob; progress: number }) {
+function ProgressBar({ job, progress }: { job: ClassificationJob; progress: ReturnType<typeof getClassificationProgress> }) {
   return (
     <div className="classification-progress">
       <div>
         <strong>{job.message}</strong>
-        <span>{job.processed}/{job.total} · 成功 {job.categorized} · 失败 {job.failed}</span>
+        <span>{progress.processed}/{progress.total} · 成功 {progress.categorized} · 失败 {progress.failed}</span>
       </div>
-      <div className={`progress-track ${job.status === "running" && job.processed < job.total ? "active" : ""}`}>
-        <span style={{ width: `${progress}%` }} />
+      <div className={`progress-track ${progress.isActive ? "active" : ""}`}>
+        <span style={{ width: `${progress.percent}%` }} />
       </div>
     </div>
   );

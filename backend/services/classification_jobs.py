@@ -79,14 +79,18 @@ def run_classification_job(job_id: str) -> None:
 
     try:
         result = categorize_batch(txn_ids, progress_callback=on_progress)
+        categorized = int(result["categorized"])
+        failed = int(result["failed"])
+        total = int(result["total"])
+        processed = min(total, categorized + failed)
         finished_status = "failed" if result.get("error") and result["failed"] == result["total"] else "done"
         _update_job(
             job_id,
             status=finished_status,
-            processed=result["total"],
-            total=result["total"],
-            categorized=result["categorized"],
-            failed=result["failed"],
+            processed=processed,
+            total=total,
+            categorized=categorized,
+            failed=failed,
             error=result.get("error"),
             message="分类完成" if not result.get("error") else f"分类失败：{result['error']}",
         )

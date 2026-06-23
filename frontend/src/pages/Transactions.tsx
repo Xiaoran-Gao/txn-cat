@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, type ReactNode } from "react";
 import { api } from "../api/client";
 import type { Category, ClassificationJob, ImportResult, Transaction } from "../types";
+import { getClassificationProgress } from "../utils/classificationProgress";
 import {
   AlertTriangle,
   CalendarDays,
@@ -237,9 +238,7 @@ export default function Transactions() {
   }, [txns]);
 
   const totalPages = Math.ceil(total / perPage);
-  const classificationProgress = classificationJob?.total
-    ? Math.round((classificationJob.processed / classificationJob.total) * 100)
-    : 0;
+  const classificationProgress = classificationJob ? getClassificationProgress(classificationJob) : null;
 
   return (
     <div className="transactions-workbench">
@@ -273,20 +272,20 @@ export default function Transactions() {
         </div>
       )}
 
-      {classificationJob && (
+      {classificationJob && classificationProgress && (
         <div className="import-banner">
           <div className="classification-banner-body">
             <div>
-              <Loader2 className={classificationJob.status === "queued" || classificationJob.status === "running" ? "spin" : ""} size={18} />
+              <Loader2 className={classificationJob.status === "queued" || classificationProgress.isActive ? "spin" : ""} size={18} />
               <span>
                 <b>{classificationJob.message}</b>：
-                {classificationJob.processed}/{classificationJob.total}
-                ，成功 <b>{classificationJob.categorized}</b> 条，失败 <b>{classificationJob.failed}</b> 条
+                {classificationProgress.processed}/{classificationProgress.total}
+                ，成功 <b>{classificationProgress.categorized}</b> 条，失败 <b>{classificationProgress.failed}</b> 条
               </span>
               {classificationJob.error && <span className="danger-text">，{classificationJob.error}</span>}
             </div>
-            <div className={`progress-track ${classificationJob.status === "running" && classificationJob.processed < classificationJob.total ? "active" : ""}`}>
-              <span style={{ width: `${classificationProgress}%` }} />
+            <div className={`progress-track ${classificationProgress.isActive ? "active" : ""}`}>
+              <span style={{ width: `${classificationProgress.percent}%` }} />
             </div>
           </div>
           <button className="ghost-link" onClick={() => setClassificationJob(null)}>关闭</button>

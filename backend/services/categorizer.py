@@ -564,8 +564,11 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
             txn_ids,
         ).fetchall()
 
-    groups = _group_rows_for_classification(rows)
-    representative_rows = [group["representative"] for group in groups]
+    fetched_ids = {int(row["id"]) for row in rows}
+    missing_count = sum(1 for txn_id in txn_ids if int(txn_id) not in fetched_ids)
+    if missing_count:
+        failed += missing_count
+        emit_progress(categorized + failed, f"跳过不存在的交易 {missing_count} 条")
 
     for start in range(0, len(representative_rows), batch_size):
         chunk = representative_rows[start:start + batch_size]
