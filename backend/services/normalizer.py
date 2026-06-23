@@ -70,3 +70,66 @@ def normalize_product_info(raw: str | None) -> str | None:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
     return cleaned or None
+
+
+def canonical_merchant(
+    raw_description: str | None,
+    display_description: str | None = None,
+    product_info: str | None = None,
+) -> str | None:
+    """Return a stable merchant key for aggregation without changing display text."""
+    candidates = _merchant_candidates(raw_description, display_description, product_info)
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        merchant = _merchant_candidate(candidate)
+        if merchant:
+            return merchant
+    return None
+
+
+def _merchant_candidates(*values: str | None) -> list[str]:
+    candidates = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() == "nan":
+            continue
+        parts = re.split(r"\s+", text)
+        candidates.extend(part for part in parts if part)
+    return sorted(candidates, key=_merchant_candidate_score, reverse=True)
+
+
+def _merchant_candidate_score(text: str) -> tuple[int, int]:
+    score = 0
+    if re.search(r"(医院|诊所|药房|药店|餐厅|饭店|咖啡|超市|便利店|商场|百货|酒店|影院)$", text):
+        score += 4
+    if re.search(r"[（(].*?[）)]", text):
+        score += 2
+    if any(marker in text for marker in ("·", "&", "＆", "/", "-")):
+        score += 1
+    if re.search(r"(公司|集团|有限责任公司|股份有限公司|有限公司)$", text):
+        score -= 2
+    if re.search(r"(订单|单号|流水|支付|缴费|充值|转账|还款|退款|付款|收款|扫码)", text):
+        score -= 3
+    if re.fullmatch(r"[\d\W_]+", text):
+        score -= 10
+    return score, min(len(text), 30)
+
+
+def _merchant_candidate(text: str) -> str | None:
+    cleaned = normalize_description(text)
+    cleaned = re.sub(r"[（(].*?[）)]", "", cleaned)
+    cleaned = re.split(r"[·&＆/]", cleaned, maxsplit=1)[0]
+    cleaned = re.sub(r"[-_—].*$", "", cleaned)
+    cleaned = re.sub(r"\d+$", "", cleaned)
+    cleaned = re.sub(
+        r"(有限责任公司|股份有限公司|有限公司|分公司|门店|店铺|餐厅|快餐|餐饮|外卖|扫码付|付款|收款)$",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = cleaned.strip(" ,，。、:：;；-—_")
+    return cleaned or None

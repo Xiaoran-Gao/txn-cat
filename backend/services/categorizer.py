@@ -4,15 +4,18 @@ import time
 import urllib.request
 from urllib.error import HTTPError, URLError
 import ollama
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from functools import lru_cache
-from threading import Lock
+from threading import BoundedSemaphore
 from config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     OLLAMA_TIMEOUT,
     OLLAMA_BATCH_SIZE,
     OLLAMA_RETRY_BATCH_SIZE,
+    OLLAMA_BATCH_WORKERS,
+    OLLAMA_MAX_PARALLEL,
     OLLAMA_REVIEW_LOW_CONFIDENCE,
     OLLAMA_REVIEW_SAMPLE_RATE,
     OLLAMA_MAX_RETRIES,
@@ -20,29 +23,54 @@ from config import (
 )
 from database import db_connection
 
-_OLLAMA_CALL_LOCK = Lock()
+_OLLAMA_CALL_SEMAPHORE = BoundedSemaphore(max(1, OLLAMA_MAX_PARALLEL))
 PRODUCT_GROUP_SIMILARITY_THRESHOLD = 0.6
 
-UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。根据交易描述、商品/服务信息和金额，生成适合账本展示的交易描述并完成交易分类。
+UNIFIED_CLASSIFY_PROMPT = """你是一个本地账单交易分类助手。请根据交易描述、商品/服务信息、商户/品牌、平台/支付渠道、金额方向，生成稳定的展示描述并完成分类。
 
 分类表：
 {category_choices}
 
 {corrections}
 
+退款/历史上下文：
 {refund_context}
 
-规则：
-- display_description 输出清洗后的交易描述，不要解释。它要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
-- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
-- 商品/服务信息是判断用途的重要证据，优先级高于平台名。比如“美团 + 外卖/餐品”应归餐饮美食，不要因为美团也可订酒店/旅行而归旅行出行。
-- 只有原始描述或商品/服务信息明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
-- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
-- category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
-- subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
-- 金额小于 0 通常表示收入或退款，请结合描述判断。
+分类总原则：
+- 优先做“消费用途分析”，不要优先做渠道分析。
+- 判断顺序：明确消费对象或用途 > 商户/品牌 > 交易方式 > 平台/支付渠道。
+- 更具体的中文语义优先于更泛的语义。
+- 商品/服务对象明确时按对象分类；外卖、网购、配送、扫码只是交易方式，只有对象或用途不明确时才作为兜底。
+- 平台/支付渠道不能单独决定分类。
+- 金额不能用于猜测消费用途，只能辅助判断收入、支出、退款方向。
+- 与用户纠正记录、相似历史交易保持一致，除非当前交易有更明确的证据。
+
+重点口径：
+- 咖啡外卖、奶茶外卖、茶饮外卖、果茶外卖：核心对象是饮品，应归餐饮美食 > 咖啡饮品，不归外卖。
+- 普通餐食外卖、餐品配送、无法识别具体食物类别的外卖：归餐饮美食 > 外卖。
+- 餐厅到店、饭店扫码、堂食消费：归餐饮美食 > 餐馆。
+- 药品配送、药店外卖、买药：核心对象是药品，应归医疗健康 > 药店，不归外卖。
+- 网购有明确商品时按商品类，如手机归数码、衣服归服饰；商品不明确才归网购。
+- 酒店/机票/打车/还款/手续费/话费/水电燃气等用途明确时按用途分类。
+- 纯转账、红包、亲友收付款、AA、代付：无法判断具体用途时归其他 > 其他，并降低置信度；若描述明确指向房租/餐费/电影票等用途，则按具体用途分类。
+- 退款优先继承原交易分类；找不到原交易且只知道是退款时，才归收入 > 退款。
+
+display_description 规则：
+- 输出稳定、可读、信息量适中的展示描述，优先保留可识别的商户/品牌/交易对方，去掉流水号、订单号、卡号尾号、支付渠道噪音。
+- 如果只知道商户/交易对方，不要脑补用途，保留商户/交易对方。
+- 如果商户/品牌和用途都明确，应输出“商户/品牌 + 简短用途/对象”，例如“招商银行信用卡还款”“滴滴出行打车”“携程酒店”“瑞幸咖啡饮品”。
+- 不要只输出过泛的平台或用途，例如不要把“滴滴出行打车”简化为“打车”，也不要把“瑞幸咖啡外卖”简化为“外卖”。
+- 同一商户同一商品/服务应尽量生成一致的 display_description；不要根据金额、时间、平台自行补全不存在的场景。
+
+置信度规则：
+- 消费对象或用途明确且分类唯一可给高置信度；只有商户/品牌给中等置信度；只有平台/支付渠道或纯转账无法判断用途时给低置信度。
+- 与历史相似交易冲突时降低置信度。
+
+输出要求：
+- category_id 必须选择一级分类 ID，不能使用二级分类 ID。
+- subcategory_id 必须属于该一级分类；不确定时选择该一级分类下的“其他”，没有合适一级分类时归其他 > 其他。
 - confidence 输出 0-100 的整数，表示你对分类的把握，不要为了显得确定而虚高。
-- 只返回 JSON，不要输出 Markdown 或解释。
+- 只返回 JSON，不要 Markdown，不要解释。
 
 JSON 格式：
 {{"display_description":"...","category_id":1,"subcategory_id":2,"confidence":88}}"""
@@ -82,7 +110,7 @@ def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.1, nu
         method="POST",
     )
     attempts = max(1, OLLAMA_MAX_RETRIES)
-    with _OLLAMA_CALL_LOCK:
+    with _OLLAMA_CALL_SEMAPHORE:
         for attempt in range(attempts):
             try:
                 with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as res:
@@ -407,6 +435,8 @@ def _llm_item_from_row(row) -> dict:
     }
     if _row_get(row, "merchant_platform"):
         item["merchant_platform"] = _row_get(row, "merchant_platform")
+    if _row_get(row, "merchant_canonical"):
+        item["merchant_canonical"] = _row_get(row, "merchant_canonical")
     if _row_get(row, "display_product_info") or _row_get(row, "raw_product_info"):
         item["product_info"] = _row_get(row, "display_product_info") or _row_get(row, "raw_product_info")
         item["raw_product_info"] = _row_get(row, "raw_product_info")
@@ -422,6 +452,7 @@ def _single_user_prompt(
     raw_product_info: str | None = None,
     display_product_info: str | None = None,
     merchant_platform: str | None = None,
+    merchant_canonical: str | None = None,
 ) -> str:
     lines = [
         f'交易描述："{description}"',
@@ -429,6 +460,8 @@ def _single_user_prompt(
     ]
     if merchant_platform:
         lines.append(f'消费平台："{merchant_platform}"')
+    if merchant_canonical:
+        lines.append(f'规范商户/品牌："{merchant_canonical}"')
     product_info = display_product_info or raw_product_info
     if product_info:
         lines.append(f'商品/服务信息："{product_info}"')
@@ -445,6 +478,7 @@ def categorize_transaction(
     raw_product_info: str | None = None,
     display_product_info: str | None = None,
     merchant_platform: str | None = None,
+    merchant_canonical: str | None = None,
 ) -> dict:
     """Classify one transaction with a single Ollama call."""
     category_choices = _build_category_choices()
@@ -466,6 +500,7 @@ def categorize_transaction(
                 raw_product_info=raw_product_info,
                 display_product_info=display_product_info,
                 merchant_platform=merchant_platform,
+                merchant_canonical=merchant_canonical,
             ),
             temperature=0,
             num_predict=96,
@@ -515,6 +550,7 @@ def categorize_transaction(
                 "raw_product_info": raw_product_info,
                 "display_product_info": display_product_info,
                 "merchant_platform": merchant_platform,
+                "merchant_canonical": merchant_canonical,
                 "amount": amount,
             }],
             [final_result],
@@ -526,6 +562,29 @@ def categorize_transaction(
             final_result = reviewed[0]
     final_result.pop("id", None)
     return final_result
+
+
+def _classification_update_values(row, result: dict) -> tuple:
+    display_description = (
+        row["display_description"]
+        if row["display_description_source"] == "manual"
+        else result.get("display_description")
+    )
+    display_description_source = (
+        row["display_description_source"]
+        if row["display_description_source"] == "manual"
+        else result.get("display_description_source") or "llm"
+    )
+    return (
+        result.get("category_id"),
+        result.get("subcategory_id"),
+        display_description,
+        display_description_source,
+        _clean_confidence(result.get("classification_confidence", result.get("confidence"))),
+        result.get("classification_review_status") or "not_reviewed",
+        result.get("classification_review_reason") or result.get("review_reason"),
+        row["id"],
+    )
 
 
 def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
@@ -558,7 +617,9 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
 
     with db_connection() as conn:
         rows = conn.execute(
-            """SELECT id, display_description, display_description_source, raw_description, raw_product_info, display_product_info, merchant_platform, amount
+            """SELECT id, display_description, display_description_source, raw_description,
+                      raw_product_info, display_product_info, merchant_platform,
+                      merchant_canonical, amount
                FROM transactions
                WHERE id IN ({})""".format(",".join("?" for _ in txn_ids)),
             txn_ids,
@@ -570,134 +631,207 @@ def categorize_batch(txn_ids: list[int], progress_callback=None) -> dict:
         failed += missing_count
         emit_progress(categorized + failed, f"跳过不存在的交易 {missing_count} 条")
 
+    history_updates = []
+    remaining_rows = []
+    for row in rows:
+        result = reuse_historical_classification(row, exclude_ids={int(row["id"])})
+        if result:
+            history_updates.append(_classification_update_values(row, result))
+        else:
+            remaining_rows.append(row)
+
+    if history_updates:
+        with db_connection() as conn:
+            conn.executemany(
+                """UPDATE transactions
+                   SET category_id = ?,
+                       subcategory_id = ?,
+                       is_categorized = 1,
+                       display_description = ?,
+                       display_description_source = ?,
+                       classification_confidence = ?,
+                       classification_review_status = ?,
+                       classification_review_reason = ?
+                   WHERE id = ?""",
+                history_updates,
+            )
+        categorized += len(history_updates)
+        emit_progress(categorized + failed, f"已复用历史分类 {len(history_updates)} 条")
+
+    if not remaining_rows:
+        return {"total": total, "categorized": categorized, "failed": failed, "error": last_error}
+
+    groups = _group_rows_for_classification(remaining_rows)
+    representative_rows = [group["representative"] for group in groups]
+    chunk_specs = []
     for start in range(0, len(representative_rows), batch_size):
         chunk = representative_rows[start:start + batch_size]
-        chunk_group_count = len(chunk)
+        chunk_specs.append((start, chunk, groups[start:start + len(chunk)]))
+
+    worker_count = min(
+        len(chunk_specs),
+        _clamp_batch_size(OLLAMA_BATCH_WORKERS, 1, 1, 8),
+    )
+
+    def apply_chunk_result(chunk_result: dict) -> None:
+        nonlocal categorized, failed, last_error
+        updates = chunk_result.get("updates") or []
+        chunk_failed = int(chunk_result.get("failed", 0))
+        error = chunk_result.get("error")
+        if updates:
+            _persist_classification_updates(updates)
+            categorized += len(updates)
+        failed += chunk_failed
+        if error:
+            last_error = error
+        emit_progress(categorized + failed)
+
+    if worker_count <= 1:
+        for start, chunk, chunk_groups in chunk_specs:
+            emit_progress(
+                categorized + failed,
+                f"正在调用 LLM 分类 {start + 1}-{start + len(chunk)}/{len(representative_rows)} 个去重交易线索",
+            )
+            apply_chunk_result(
+                _classify_group_chunk(
+                    chunk,
+                    chunk_groups,
+                    retry_batch_size,
+                    llm_context,
+                    low_confidence,
+                    review_sample_rate,
+                )
+            )
+    else:
         emit_progress(
             categorized + failed,
-            f"正在调用 LLM 分类 {start + 1}-{start + chunk_group_count}/{len(representative_rows)} 个去重交易线索",
+            f"正在并行调用 LLM 分类 {len(chunk_specs)} 个批次，worker={worker_count}",
         )
-        try:
-            results = categorize_many_with_llm(chunk, llm_context=llm_context)
-        except Exception as exc:
-            last_error = str(exc)
-            results = []
-        valid_results, retry_rows = _split_valid_batch_results(chunk, results)
-        if retry_rows:
-            retry_results = []
-            retry_errors = []
-            for retry_start in range(0, len(retry_rows), retry_batch_size):
-                retry_chunk = retry_rows[retry_start:retry_start + retry_batch_size]
-                emit_progress(
-                    categorized + failed,
-                    f"正在用 LLM 修复 {len(retry_chunk)} 条分类结果",
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {}
+            for _, chunk, chunk_groups in chunk_specs:
+                future = executor.submit(
+                    _classify_group_chunk,
+                    chunk,
+                    chunk_groups,
+                    retry_batch_size,
+                    llm_context,
+                    low_confidence,
+                    review_sample_rate,
                 )
+                futures[future] = sum(len(group["rows"]) for group in chunk_groups)
+            for future in as_completed(futures):
                 try:
-                    retry_results.extend(
-                        categorize_many_with_llm(
-                            retry_chunk,
-                            llm_context=llm_context,
-                            strict=True,
-                        )
-                    )
-                except Exception as exc:
-                    retry_errors.append(str(exc))
-            retry_valid, _ = _split_valid_batch_results(retry_rows, retry_results)
-            valid_results.extend(retry_valid)
-            last_error = retry_errors[-1] if retry_errors else None
-
-        if valid_results:
-            review_count = sum(
-                1 for result in valid_results
-                if _should_review(result, low_confidence, review_sample_rate)
-            )
-            if review_count:
-                try:
-                    emit_progress(
-                        categorized + failed,
-                        f"正在复核 {review_count} 条低置信/抽样结果",
-                    )
-                    valid_results = review_classification_results(
-                        chunk,
-                        valid_results,
-                        llm_context=llm_context,
-                        low_confidence=low_confidence,
-                        sample_rate=review_sample_rate,
-                    )
+                    apply_chunk_result(future.result())
                 except Exception as exc:
                     last_error = str(exc)
-
-        by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
-
-        updates = []
-        chunk_groups = groups[start:start + chunk_group_count]
-        for index, txn in enumerate(chunk):
-            result = by_id.get(txn["id"])
-            group = chunk_groups[index]
-            group_rows = group["rows"]
-            if not result:
-                failed += len(group_rows)
-                emit_progress(categorized + failed)
-                continue
-
-            category_id, subcategory_id = _valid_category_ids(
-                result.get("category_id"),
-                result.get("subcategory_id"),
-            )
-            if not category_id:
-                category_id, subcategory_id = _resolve_category_ids(
-                    result.get("category", ""),
-                    result.get("subcategory", ""),
-                )
-            if not category_id:
-                failed += len(group_rows)
-                emit_progress(categorized + failed)
-                continue
-
-            confidence = _clean_confidence(result.get("classification_confidence", result.get("confidence")))
-            review_status = result.get("classification_review_status") or "not_reviewed"
-            review_reason = result.get("classification_review_reason") or result.get("review_reason")
-            for group_txn in group_rows:
-                display_description = (
-                    group_txn["display_description"]
-                    if group_txn["display_description_source"] == "manual"
-                    else result.get("display_description")
-                )
-                display_description_source = (
-                    group_txn["display_description_source"]
-                    if group_txn["display_description_source"] == "manual"
-                    else "llm"
-                )
-                updates.append((
-                    category_id,
-                    subcategory_id,
-                    display_description,
-                    display_description_source,
-                    confidence,
-                    review_status,
-                    review_reason,
-                    group_txn["id"],
-                ))
-
-        if updates:
-            with db_connection() as conn:
-                conn.executemany(
-                    """UPDATE transactions
-                       SET category_id = ?,
-                           subcategory_id = ?,
-                           is_categorized = 1,
-                           display_description = ?,
-                           display_description_source = ?,
-                           classification_confidence = ?,
-                           classification_review_status = ?,
-                           classification_review_reason = ?
-                       WHERE id = ?""",
-                    updates,
-                )
-            categorized += len(updates)
-            emit_progress(categorized + failed)
+                    failed += futures[future]
+                    emit_progress(categorized + failed)
 
     return {"total": total, "categorized": categorized, "failed": failed, "error": last_error}
+
+
+def _classify_group_chunk(
+    chunk,
+    chunk_groups,
+    retry_batch_size: int,
+    llm_context: dict,
+    low_confidence: int,
+    review_sample_rate: float,
+) -> dict:
+    last_error = None
+    failed = 0
+
+    try:
+        results = categorize_many_with_llm(chunk, llm_context=llm_context)
+    except Exception as exc:
+        last_error = str(exc)
+        results = []
+
+    valid_results, retry_rows = _split_valid_batch_results(chunk, results)
+    if retry_rows:
+        retry_results = []
+        retry_errors = []
+        for retry_start in range(0, len(retry_rows), retry_batch_size):
+            retry_chunk = retry_rows[retry_start:retry_start + retry_batch_size]
+            try:
+                retry_results.extend(
+                    categorize_many_with_llm(
+                        retry_chunk,
+                        llm_context=llm_context,
+                        strict=True,
+                    )
+                )
+            except Exception as exc:
+                retry_errors.append(str(exc))
+        retry_valid, _ = _split_valid_batch_results(retry_rows, retry_results)
+        valid_results.extend(retry_valid)
+        if retry_errors:
+            last_error = retry_errors[-1]
+
+    if valid_results:
+        review_count = sum(
+            1 for result in valid_results
+            if _should_review(result, low_confidence, review_sample_rate)
+        )
+        if review_count:
+            try:
+                valid_results = review_classification_results(
+                    chunk,
+                    valid_results,
+                    llm_context=llm_context,
+                    low_confidence=low_confidence,
+                    sample_rate=review_sample_rate,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+
+    by_id = {int(r.get("id")): r for r in valid_results if r.get("id") is not None}
+    updates = []
+    for index, txn in enumerate(chunk):
+        result = by_id.get(txn["id"])
+        group_rows = chunk_groups[index]["rows"]
+        if not result:
+            failed += len(group_rows)
+            continue
+
+        category_id, subcategory_id = _valid_category_ids(
+            result.get("category_id"),
+            result.get("subcategory_id"),
+        )
+        if not category_id:
+            category_id, subcategory_id = _resolve_category_ids(
+                result.get("category", ""),
+                result.get("subcategory", ""),
+            )
+        if not category_id:
+            failed += len(group_rows)
+            continue
+
+        for group_txn in group_rows:
+            normalized_result = dict(result)
+            normalized_result["category_id"] = category_id
+            normalized_result["subcategory_id"] = subcategory_id
+            updates.append(_classification_update_values(group_txn, normalized_result))
+
+    return {"updates": updates, "failed": failed, "error": last_error}
+
+
+def _persist_classification_updates(updates: list[tuple]) -> None:
+    with db_connection() as conn:
+        conn.executemany(
+            """UPDATE transactions
+               SET category_id = ?,
+                   subcategory_id = ?,
+                   is_categorized = 1,
+                   display_description = ?,
+                   display_description_source = ?,
+                   classification_confidence = ?,
+                   classification_review_status = ?,
+                   classification_review_reason = ?
+               WHERE id = ?""",
+            updates,
+        )
 
 
 def _amount_direction(amount) -> str:
@@ -713,10 +847,13 @@ def _amount_direction(amount) -> str:
 
 
 def _group_rows_for_classification(rows) -> list[dict]:
-    grouped: dict[tuple[str, str], list[dict]] = {}
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
-        description = (row["display_description"] or row["raw_description"] or "").strip()
-        bucket_key = (description, _amount_direction(row["amount"]))
+        bucket_key = (
+            _merchant_group_key(row),
+            _description_group_key(row),
+            _amount_direction(_row_get(row, "amount")),
+        )
         product_key = _product_group_key(row)
         bucket = grouped.setdefault(bucket_key, [])
         group = _find_similar_product_group(bucket, product_key)
@@ -751,8 +888,18 @@ def _product_keys_similar(left: str, right: str) -> bool:
     return SequenceMatcher(None, left, right).ratio() >= PRODUCT_GROUP_SIMILARITY_THRESHOLD
 
 
+def _merchant_group_key(row) -> str:
+    return (_row_get(row, "merchant_canonical") or "").strip()
+
+
+def _description_group_key(row) -> str:
+    if _merchant_group_key(row):
+        return ""
+    return (_row_get(row, "display_description") or _row_get(row, "raw_description") or "").strip()
+
+
 def _product_group_key(row) -> str:
-    product = (row["display_product_info"] or row["raw_product_info"] or "").strip()
+    product = (_row_get(row, "display_product_info") or _row_get(row, "raw_product_info") or "").strip()
     if not product:
         return ""
 
@@ -765,6 +912,205 @@ def _product_group_key(row) -> str:
     text = re.sub(r"\d+", " ", text)
     text = re.sub(r"[\s,，。、:：;；\-—_]+", " ", text).strip()
     return text[:40]
+
+
+def reuse_historical_classification(row, exclude_ids: set[int] | None = None) -> dict | None:
+    """Return a trusted historical classification for a similar transaction.
+
+    The lookup is deliberately conservative: exact user corrections and exact
+    prior transactions are safe to reuse, while merchant-level reuse also needs
+    compatible product details so generic platforms do not dominate the result.
+    """
+    row = dict(row)
+    exclude_ids = exclude_ids or set()
+
+    correction = _history_from_correction(row)
+    if correction:
+        return correction
+
+    exact = _history_from_exact_transaction(row, exclude_ids)
+    if exact:
+        return exact
+
+    return _history_from_merchant_product(row, exclude_ids)
+
+
+def _history_from_correction(row: dict) -> dict | None:
+    raw_description = (row.get("raw_description") or "").strip()
+    if not raw_description:
+        return None
+
+    with db_connection() as conn:
+        match = conn.execute(
+            """SELECT display_description, category_id, subcategory_id
+               FROM correction_examples
+               WHERE raw_description = ?
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (raw_description,),
+        ).fetchone()
+
+    if not match:
+        return None
+
+    category_id, subcategory_id = _valid_category_ids(match["category_id"], match["subcategory_id"])
+    if not category_id:
+        return None
+
+    return {
+        "id": row.get("id"),
+        "category_id": category_id,
+        "subcategory_id": subcategory_id,
+        "display_description": match["display_description"] or row.get("display_description") or raw_description,
+        "classification_confidence": 100,
+        "classification_review_status": "history_correction",
+        "classification_review_reason": "命中用户纠正记录",
+        "display_description_source": "history",
+    }
+
+
+def _history_from_exact_transaction(row: dict, exclude_ids: set[int]) -> dict | None:
+    raw_description = (row.get("raw_description") or "").strip()
+    if not raw_description:
+        return None
+
+    params: list = [
+        raw_description,
+        row.get("raw_product_info"),
+        _amount_direction(row.get("amount")),
+    ]
+    exclude_sql, exclude_params = _exclude_ids_sql(exclude_ids)
+    params.extend(exclude_params)
+
+    with db_connection() as conn:
+        match = conn.execute(
+            f"""SELECT id, display_description, category_id, subcategory_id,
+                       classification_confidence, classification_review_status
+                FROM transactions
+                WHERE raw_description = ?
+                  AND COALESCE(raw_product_info, '') = COALESCE(?, '')
+                  AND is_categorized = 1
+                  AND category_id IS NOT NULL
+                  AND CASE
+                        WHEN amount < 0 THEN 'negative'
+                        WHEN amount > 0 THEN 'positive'
+                        ELSE 'zero'
+                      END = ?
+                  {exclude_sql}
+                ORDER BY
+                  CASE classification_review_status
+                    WHEN 'manual' THEN 0
+                    WHEN 'history_correction' THEN 1
+                    WHEN 'review_corrected' THEN 2
+                    WHEN 'review_approved' THEN 3
+                    ELSE 4
+                  END,
+                  COALESCE(classification_confidence, 0) DESC,
+                  date DESC,
+                  id DESC
+                LIMIT 1""",
+            params,
+        ).fetchone()
+
+    if not match:
+        return None
+    return _history_result_from_match(row, match, "history_exact", "命中相同交易历史分类", default_confidence=96)
+
+
+def _history_from_merchant_product(row: dict, exclude_ids: set[int]) -> dict | None:
+    merchant = (row.get("merchant_canonical") or "").strip()
+    if not merchant or len(merchant) < 2:
+        return None
+
+    product_key = _product_group_key(row)
+    if not product_key:
+        return None
+
+    params: list = [merchant, _amount_direction(row.get("amount"))]
+    exclude_sql, exclude_params = _exclude_ids_sql(exclude_ids)
+    params.extend(exclude_params)
+
+    with db_connection() as conn:
+        candidates = conn.execute(
+            f"""SELECT id, display_description, raw_product_info, display_product_info,
+                       category_id, subcategory_id, classification_confidence,
+                       classification_review_status
+                FROM transactions
+                WHERE merchant_canonical = ?
+                  AND is_categorized = 1
+                  AND category_id IS NOT NULL
+                  AND CASE
+                        WHEN amount < 0 THEN 'negative'
+                        WHEN amount > 0 THEN 'positive'
+                        ELSE 'zero'
+                      END = ?
+                  {exclude_sql}
+                ORDER BY
+                  CASE classification_review_status
+                    WHEN 'manual' THEN 0
+                    WHEN 'history_correction' THEN 1
+                    WHEN 'review_corrected' THEN 2
+                    WHEN 'review_approved' THEN 3
+                    ELSE 4
+                  END,
+                  COALESCE(classification_confidence, 0) DESC,
+                  date DESC,
+                  id DESC
+                LIMIT 20""",
+            params,
+        ).fetchall()
+
+    best = None
+    best_score = 0.0
+    for candidate in candidates:
+        candidate_key = _product_group_key(candidate)
+        if not _product_keys_similar(product_key, candidate_key):
+            continue
+        score = SequenceMatcher(None, product_key, candidate_key).ratio()
+        if score > best_score:
+            best = candidate
+            best_score = score
+
+    if not best:
+        return None
+    return _history_result_from_match(row, best, "history_merchant_product", "命中同商户相似商品历史分类", default_confidence=90)
+
+
+def _history_result_from_match(
+    row: dict,
+    match,
+    status: str,
+    reason: str,
+    default_confidence: int,
+) -> dict | None:
+    category_id, subcategory_id = _valid_category_ids(match["category_id"], match["subcategory_id"])
+    if not category_id:
+        return None
+
+    confidence = _clean_confidence(match["classification_confidence"])
+    if confidence is None:
+        confidence = default_confidence
+    elif match["classification_review_status"] != "manual":
+        confidence = min(confidence, default_confidence)
+
+    return {
+        "id": row.get("id"),
+        "category_id": category_id,
+        "subcategory_id": subcategory_id,
+        "display_description": match["display_description"] or row.get("display_description") or row.get("raw_description"),
+        "classification_confidence": confidence,
+        "classification_review_status": status,
+        "classification_review_reason": reason,
+        "display_description_source": "history",
+    }
+
+
+def _exclude_ids_sql(exclude_ids: set[int]) -> tuple[str, list[int]]:
+    clean_ids = sorted({int(value) for value in exclude_ids if value is not None})
+    if not clean_ids:
+        return "", []
+    placeholders = ",".join("?" for _ in clean_ids)
+    return f"AND id NOT IN ({placeholders})", clean_ids
 
 
 def _split_valid_batch_results(rows, results: list[dict]) -> tuple[list[dict], list]:
@@ -864,7 +1210,13 @@ def review_classification_results(
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- 商品/服务信息是判断用途的重要证据，优先级高于平台名；例如“美团 + 外卖/餐品”应归餐饮美食，不应归旅行出行。
+- 优先做消费用途分析：先看明确消费对象或用途，其次参考商户/品牌，最后才参考交易方式、平台和支付渠道。
+- 复核时重点检查是否被平台词误导，例如美团、京东、淘宝、微信、支付宝。
+- 复核时重点检查是否把方式词当成最终消费对象，例如外卖、网购、配送；如果消费对象或用途更明确，应按更具体语义分类。
+- 复核时重点检查是否和相似历史交易或人工纠正不一致。
+- 复核时重点检查是否把退款简单归收入，而没有尝试继承原交易分类。
+- 复核时重点检查是否把纯转账硬猜成消费；无法判断用途时应归其他 > 其他并降低置信度。
+- 示例：咖啡/奶茶外卖应归咖啡饮品，普通餐食外卖可归外卖，药品配送应归医疗健康/药店，京东手机应归数码电器。
 - 如果候选分类合理，approved=true，并返回原 category_id/subcategory_id。
 - 如果候选分类不合理，approved=false，并返回修正后的 category_id/subcategory_id。
 - category_id 必须选择一级分类 ID；subcategory_id 必须属于该一级分类，不能编造 ID。
@@ -939,14 +1291,28 @@ def categorize_many_with_llm(rows, llm_context: dict | None = None, strict: bool
 
 规则：
 - 每个输入 id 必须返回一条结果。
-- display_description 要短、可读，去掉流水号/订单号/卡号尾号/支付渠道噪音，保留真实交易对象或用途。
-- 如果原始描述只包含清晰商户/交易对方，没有明确用途信息，display_description 必须保持该商户/交易对方名称，不要补全或猜测场景。
-- 商品/服务信息是判断用途的重要证据，优先级高于平台名。比如“美团 + 外卖/餐品”应归餐饮美食，不要因为美团也可订酒店/旅行而归旅行出行。
-- 只有原始描述或商品/服务信息明确包含外卖、买菜、打车、酒店、电影、会员、转账、还款等用途信息时，才保留为"美团外卖"、"滴滴打车"、"招商银行信用卡还款"、"微信转账-张三"这类更具体描述。
-- 不要根据金额大小推断用途；金额只能辅助判断收入、退款或支出方向。
+- 优先做“消费用途分析”，不要优先做渠道分析。
+- 判断顺序：明确消费对象或用途 > 商户/品牌 > 交易方式 > 平台/支付渠道。
+- 更具体的中文语义优先于更泛的语义。
+- 商品/服务对象明确时按对象分类；外卖、网购、配送、扫码只是交易方式，只有对象或用途不明确时才作为兜底。
+- 平台/支付渠道不能单独决定分类；金额不能用于猜测消费用途，只能辅助判断收入、支出、退款方向。
+- 与用户纠正记录、相似历史交易保持一致，除非当前交易有更明确的证据。
+- 咖啡外卖、奶茶外卖、茶饮外卖、果茶外卖：核心对象是饮品，应归餐饮美食 > 咖啡饮品，不归外卖。
+- 普通餐食外卖、餐品配送、无法识别具体食物类别的外卖：归餐饮美食 > 外卖。
+- 餐厅到店、饭店扫码、堂食消费：归餐饮美食 > 餐馆。
+- 药品配送、药店外卖、买药：核心对象是药品，应归医疗健康 > 药店，不归外卖。
+- 网购有明确商品时按商品类，如手机归数码、衣服归服饰；商品不明确才归网购。
+- 酒店/机票/打车/还款/手续费/话费/水电燃气等用途明确时按用途分类。
+- 纯转账、红包、亲友收付款、AA、代付：无法判断具体用途时归其他 > 其他，并降低置信度；若描述明确指向房租/餐费/电影票等用途，则按具体用途分类。
+- display_description 要稳定、可读、信息量适中，优先保留可识别的商户/品牌/交易对方，去掉流水号/订单号/卡号尾号/支付渠道噪音。
+- 如果只知道商户/交易对方，不要脑补用途，保留商户/交易对方。
+- 如果商户/品牌和用途都明确，应输出“商户/品牌 + 简短用途/对象”，例如“招商银行信用卡还款”“滴滴出行打车”“携程酒店”“瑞幸咖啡饮品”。
+- 不要只输出过泛的平台或用途，例如不要把“滴滴出行打车”简化为“打车”，也不要把“瑞幸咖啡外卖”简化为“外卖”。
+- 同一商户同一商品/服务应尽量生成一致的 display_description；不要根据金额、时间、平台自行补全不存在的场景。
 - category_id 必须选择箭头左侧的一级分类 ID，不能使用箭头右侧的二级分类 ID。
-- subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的"其他"子类，如果没有则为 null。
+- subcategory_id 必须选择该一级分类箭头右侧的二级分类 ID；不确定时使用对应一级分类下的“其他”，没有合适一级分类时归其他 > 其他。
 - 如果输入含 refund_context，优先参考候选原始交易来判断退款分类。
+- 退款优先继承原交易分类；找不到原交易且只知道是退款时，才归收入 > 退款。
 - confidence 输出 0-100 的整数，表示你对分类的把握，不要为了显得确定而虚高。
 - 只返回 JSON 对象，不要 Markdown 或解释。
 {strict_rules}

@@ -44,12 +44,14 @@ OLLAMA_MODEL=qwen3:8b
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_BATCH_SIZE=16
 OLLAMA_RETRY_BATCH_SIZE=8
+OLLAMA_BATCH_WORKERS=1
+OLLAMA_MAX_PARALLEL=1
 OLLAMA_REVIEW_LOW_CONFIDENCE=80
 OLLAMA_REVIEW_SAMPLE_RATE=0.10
 OLLAMA_MAX_RETRIES=3
 ```
 
-You can override these with environment variables. Larger `OLLAMA_BATCH_SIZE` values reduce round trips but need more model context and may be slower or trigger Ollama 503s on small machines; lower it if JSON responses become incomplete or Ollama becomes unavailable. Low-confidence and sampled high-confidence results are reviewed by a second LLM pass, controlled by `OLLAMA_REVIEW_LOW_CONFIDENCE` and `OLLAMA_REVIEW_SAMPLE_RATE`.
+You can override these with environment variables. Larger `OLLAMA_BATCH_SIZE` values reduce round trips but need more model context and may be slower or trigger Ollama 503s on small machines; lower it if JSON responses become incomplete or Ollama becomes unavailable. `OLLAMA_BATCH_WORKERS` parallelizes chunks within one classification job, while `OLLAMA_MAX_PARALLEL` caps concurrent Ollama requests across the backend; raise both gradually, for example to `2`, only if your local model serves parallel requests reliably. Low-confidence and sampled high-confidence results are reviewed by a second LLM pass, controlled by `OLLAMA_REVIEW_LOW_CONFIDENCE` and `OLLAMA_REVIEW_SAMPLE_RATE`.
 
 ## Start Ollama
 

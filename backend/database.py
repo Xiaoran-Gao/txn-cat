@@ -51,6 +51,7 @@ def init_db():
             account_name TEXT,
             payment_channel TEXT,
             merchant_platform TEXT,
+            merchant_canonical TEXT,
             category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
             classification_confidence INTEGER,
@@ -74,6 +75,12 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_id);
         CREATE INDEX IF NOT EXISTS idx_txn_subcategory ON transactions(subcategory_id);
         CREATE INDEX IF NOT EXISTS idx_txn_categorized ON transactions(is_categorized);
+        CREATE INDEX IF NOT EXISTS idx_txn_history_exact
+            ON transactions(raw_description, raw_product_info, is_categorized, category_id);
+        CREATE INDEX IF NOT EXISTS idx_txn_merchant_history
+            ON transactions(merchant_canonical, is_categorized, category_id, date);
+        CREATE INDEX IF NOT EXISTS idx_correction_raw_description
+            ON correction_examples(raw_description, created_at);
         """)
 
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]
@@ -110,3 +117,5 @@ def init_db():
             conn.execute("ALTER TABLE transactions ADD COLUMN classification_review_status TEXT")
         if "classification_review_reason" not in columns:
             conn.execute("ALTER TABLE transactions ADD COLUMN classification_review_reason TEXT")
+        if "merchant_canonical" not in columns:
+            conn.execute("ALTER TABLE transactions ADD COLUMN merchant_canonical TEXT")

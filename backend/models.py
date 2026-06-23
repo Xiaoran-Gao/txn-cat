@@ -57,6 +57,7 @@ class TransactionOut(BaseModel):
     account_name: Optional[str] = None
     payment_channel: Optional[str] = None
     merchant_platform: Optional[str] = None
+    merchant_canonical: Optional[str] = None
     category_id: Optional[int] = None
     category_name: Optional[str] = None
     subcategory_id: Optional[int] = None
