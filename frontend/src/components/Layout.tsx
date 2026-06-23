@@ -6,7 +6,6 @@ import {
   LayoutDashboard,
   MessageSquareText,
   ReceiptText,
-  Search,
   Settings,
   UploadCloud,
 } from "lucide-react";
@@ -126,20 +125,6 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="main-frame">
-        <header className="topbar">
-          <div className="global-search">
-            <Search size={18} />
-            <input placeholder="搜索描述" />
-            <kbd>⌘ K</kbd>
-          </div>
-          <div className="topbar-actions">
-            <div className="system-pill">
-              <span className={`live-dot ${systemInfo.statusOk ? "" : "danger"}`} />
-              <span>系统状态</span>
-              <strong className={systemInfo.statusOk ? "" : "danger"}>{systemInfo.statusText}</strong>
-            </div>
-          </div>
-        </header>
         <div className="main-content">{children}</div>
       </main>
     </div>

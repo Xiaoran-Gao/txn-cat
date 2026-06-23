@@ -1,39 +1,25 @@
 import { useEffect, useMemo, useState, useCallback, type ReactNode } from "react";
-import {
-  Cell,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-} from "recharts";
 import { api } from "../api/client";
 import type { Category, ClassificationJob, ImportResult, Transaction } from "../types";
 import {
-  Bot,
-  BriefcaseBusiness,
+  AlertTriangle,
   CalendarDays,
   CheckCircle2,
+  CheckCheck,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleDollarSign,
   Eye,
-  Grid3X3,
+  ListChecks,
   Loader2,
-  MoreVertical,
   Pencil,
   Plus,
   RefreshCcw,
-  Rows3,
+  Search,
   Sparkles,
   Trash2,
   Upload,
-  WalletCards,
 } from "lucide-react";
-
-const colorPool = ["#1f7aff", "#ff8a1f", "#22c55e", "#7c3aed", "#06b6d4", "#94a3b8"];
 
 export default function Transactions() {
   const [txns, setTxns] = useState<Transaction[]>([]);
@@ -44,9 +30,9 @@ export default function Transactions() {
   const [catFilter, setCatFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [accountFilter, setAccountFilter] = useState("all");
+  const [activeMonth, setActiveMonth] = useState(currentMonth());
   const [sortBy, setSortBy] = useState("date");
   const [sortOrder, setSortOrder] = useState("desc");
-  const [density, setDensity] = useState<"comfort" | "compact">("comfort");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Transaction | null>(null);
@@ -55,15 +41,17 @@ export default function Transactions() {
   const [classificationJob, setClassificationJob] = useState<ClassificationJob | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
-  const [activeInsight, setActiveInsight] = useState(0);
 
   const perPage = 50;
 
   const load = useCallback(() => {
     const [filterType, filterId] = catFilter.split(":");
+    const [startDate, endDate] = monthRange(activeMonth);
     api.listTransactions({
       page,
       per_page: perPage,
+      start_date: startDate,
+      end_date: endDate,
       search,
       category_id: filterType === "cat" ? filterId : undefined,
       subcategory_id: filterType === "sub" ? filterId : undefined,
@@ -79,15 +67,11 @@ export default function Transactions() {
         setTotal(d.total);
       })
       .catch(() => setToast({ msg: "加载交易记录失败", type: "error" }));
-  }, [page, search, catFilter, statusFilter, accountFilter, sortBy, sortOrder]);
+  }, [page, activeMonth, search, catFilter, statusFilter, accountFilter, sortBy, sortOrder]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     api.listCategories().then(setCategories).catch(() => {});
-  }, []);
-  useEffect(() => {
-    const timer = window.setInterval(() => setActiveInsight((v) => (v + 1) % 3), 3200);
-    return () => window.clearInterval(timer);
   }, []);
 
   const showToast = (msg: string, type = "success") => {
@@ -235,51 +219,22 @@ export default function Transactions() {
   };
 
   const stats = useMemo(() => {
-    const income = txns.filter((t) => t.amount < 0).reduce((sum, t) => sum + Math.abs(t.amount), 0);
-    const spend = txns.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
     const categorized = txns.filter((t) => t.is_categorized && t.category_name).length;
+    const uncategorized = txns.length - categorized;
+    const reviewNeeded = txns.filter(needsManualReview).length;
     const rate = txns.length ? Math.round(categorized / txns.length * 100) : 0;
-    return { income, spend, count: txns.length, rate };
+    const confidenceValues = txns
+      .map((t) => t.classification_confidence)
+      .filter((value): value is number => typeof value === "number");
+    const avgConfidence = confidenceValues.length
+      ? Math.round(confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length)
+      : null;
+    return { count: txns.length, categorized, uncategorized, reviewNeeded, rate, avgConfidence };
   }, [txns]);
 
   const accountOptions = useMemo(() => {
     return Array.from(new Set(txns.map(getAccountName).filter((account) => account !== "导入账单"))).sort();
   }, [txns]);
-
-  const categoryPie = useMemo(() => {
-    const grouped = txns.reduce<Record<string, number>>((acc, txn) => {
-      if (txn.amount > 0) acc[txn.category_name || "未分类"] = (acc[txn.category_name || "未分类"] || 0) + txn.amount;
-      return acc;
-    }, {});
-    const entries = Object.entries(grouped).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    return entries.map(([name, value], index) => ({ name, value, color: colorPool[index % colorPool.length] }));
-  }, [txns]);
-
-  const trend = useMemo(() => {
-    const grouped = txns.reduce<Record<string, { day: string; spend: number; income: number }>>((acc, txn) => {
-      const day = txn.date.slice(5);
-      acc[day] ||= { day, spend: 0, income: 0 };
-      if (txn.amount > 0) acc[day].spend += txn.amount;
-      else acc[day].income += Math.abs(txn.amount);
-      return acc;
-    }, {});
-    return Object.values(grouped).sort((a, b) => a.day.localeCompare(b.day)).slice(-12);
-  }, [txns]);
-
-  const insights = [
-    {
-      title: "本月支出概览",
-      body: `支出金额 ¥${stats.spend.toFixed(2)}，分类覆盖率 ${stats.rate}% 。`,
-    },
-    {
-      title: "待确认交易",
-      body: `${txns.filter((t) => !t.is_categorized || !t.category_name).length} 笔交易需要确认，建议使用 AI 分类批处理。`,
-    },
-    {
-      title: "趋势分析",
-      body: trend.length ? `当前筛选结果包含 ${trend.length} 个交易日期，可在右侧查看收支走势。` : "当前筛选结果暂无趋势数据。",
-    },
-  ];
 
   const totalPages = Math.ceil(total / perPage);
   const classificationProgress = classificationJob?.total
@@ -339,16 +294,33 @@ export default function Transactions() {
       )}
 
       <section className="stat-card-grid">
-        <StatCard label="总交易金额" value={`¥ ${(stats.income + stats.spend).toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<Eye size={14} />} tone="cyan" />
-        <StatCard label="收入金额" value={`¥ ${stats.income.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<WalletCards size={14} />} tone="green" />
-        <StatCard label="支出金额" value={`¥ ${stats.spend.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} meta="当前筛选" icon={<CircleDollarSign size={14} />} tone="blue" />
-        <StatCard label="交易笔数" value={String(stats.count)} meta="当前页/筛选" icon={<BriefcaseBusiness size={14} />} tone="violet" />
+        <StatCard label="当前页交易" value={`${stats.count} 条`} meta={`全量匹配 ${total} 条`} icon={<ListChecks size={14} />} tone="cyan" />
+        <StatCard label="分类覆盖率" value={`${stats.rate}%`} meta={`已分类 ${stats.categorized} 条`} icon={<CheckCheck size={14} />} tone="green" />
+        <StatCard label="未分类交易" value={`${stats.uncategorized} 条`} meta="建议批量 AI 分类" icon={<AlertTriangle size={14} />} tone="orange" />
+        <StatCard label="需要人工复核" value={`${stats.reviewNeeded} 条`} meta={stats.avgConfidence === null ? "暂无置信度" : `平均置信度 ${stats.avgConfidence}%`} icon={<Eye size={14} />} tone="violet" />
       </section>
 
-      <div className="transaction-layout-grid">
+      <div className="transaction-layout-grid single-column">
         <section className="glass-panel transaction-main-panel">
           <div className="filter-strip">
-            <button className="filter-btn"><CalendarDays size={15} /> 本月 <ChevronDown size={14} /></button>
+            <div className="table-search">
+              <Search size={15} />
+              <input
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                placeholder="搜索描述、商品、商户"
+              />
+            </div>
+            <label className="month-filter">
+              <CalendarDays size={15} />
+              <span>月份</span>
+              <input
+                type="month"
+                lang="zh-CN"
+                value={activeMonth}
+                onChange={(e) => { setActiveMonth(e.target.value); setPage(1); }}
+              />
+            </label>
             <select value={accountFilter} onChange={(e) => { setAccountFilter(e.target.value); setPage(1); }}>
               <option value="all">全部账户</option>
               {accountOptions.map((account) => <option key={account} value={account}>{account}</option>)}
@@ -377,7 +349,7 @@ export default function Transactions() {
               <option value="amount-desc">金额降序</option>
               <option value="amount-asc">金额升序</option>
             </select>
-            <button className="filter-btn" onClick={() => { setCatFilter(""); setStatusFilter("all"); setAccountFilter("all"); setSearch(""); }}>重置</button>
+            <button className="filter-btn" onClick={() => { setCatFilter(""); setStatusFilter("all"); setAccountFilter("all"); setSearch(""); setActiveMonth(currentMonth()); }}>重置</button>
           </div>
 
           <div className="table-control-line">
@@ -387,29 +359,43 @@ export default function Transactions() {
             </div>
             <div className="view-toggles">
               <button className="filter-btn" onClick={() => setShowAdd(true)}><Plus size={15} />手动添加</button>
-              <button className={density === "comfort" ? "active" : ""} onClick={() => setDensity("comfort")} title="舒展视图"><Rows3 size={16} /></button>
-              <button className={density === "compact" ? "active" : ""} onClick={() => setDensity("compact")} title="紧凑视图"><Grid3X3 size={16} /></button>
             </div>
           </div>
 
-          <div className={`transaction-table-shell ${density}`}>
+          <div className="transaction-table-shell">
             <table className="transaction-table">
+              <colgroup>
+                <col className="col-select" />
+                <col className="col-date" />
+                <col className="col-desc" />
+                <col className="col-account" />
+                <col className="col-category" />
+                <col className="col-amount" />
+                <col className="col-status" />
+                <col className="col-actions" />
+              </colgroup>
               <thead>
                 <tr>
                   <th className="checkbox-col"><input type="checkbox" checked={selected.size === txns.length && txns.length > 0} onChange={toggleAll} /></th>
                   <th>日期</th>
-                  <th>描述</th>
-                  <th>账户</th>
+                  <th>交易信息</th>
+                  <th>账户/渠道</th>
                   <th>分类</th>
                   <th>金额</th>
-                  <th>状态</th>
-                  <th>置信度</th>
-                  <th>操作</th>
+                  <th>分类状态</th>
+                  <th>
+                    <div className="actions-head">
+                      <strong>操作</strong>
+                      <span><Pencil size={11} />编辑</span>
+                      <span><Sparkles size={11} />AI 重分</span>
+                      <span><Trash2 size={11} />删除</span>
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {txns.length === 0 ? (
-                  <tr><td colSpan={9} className="empty-table-cell">暂无交易记录</td></tr>
+                  <tr><td colSpan={8} className="empty-table-cell">暂无交易记录</td></tr>
                 ) : (
                   txns.map((t) => (
                     <tr key={t.id} className={selected.has(t.id) ? "selected-row" : ""}>
@@ -417,7 +403,7 @@ export default function Transactions() {
                       <td className="date-cell">{t.date}</td>
                       <td className="desc-cell" title={t.raw_description}>
                         <strong>{t.display_description || t.raw_description}</strong>
-                        {formatDescriptionMeta(t) && <span>{formatDescriptionMeta(t)}</span>}
+                        {formatTransactionMeta(t) && <span>{formatTransactionMeta(t)}</span>}
                       </td>
                       <td className="account-cell">
                         <strong>{getAccountName(t)}</strong>
@@ -434,19 +420,20 @@ export default function Transactions() {
                       <td className={t.amount > 0 ? "amount spend" : "amount income"}>
                         {t.amount > 0 ? "-¥ " : "+¥ "}{Math.abs(t.amount).toFixed(2)}
                       </td>
-                      <td><span className={t.is_categorized && t.category_name ? "status-chip confirmed" : "status-chip pending"}>{t.is_categorized && t.category_name ? "已确认" : "待确认"}</span></td>
                       <td
                         className="confidence-cell"
                         title={reviewLabel(t.classification_review_status, t.classification_review_reason)}
                       >
-                        {typeof t.classification_confidence === "number" ? `${t.classification_confidence}%` : "未计算"}
+                        <span className={t.is_categorized && t.category_name ? "status-chip confirmed" : "status-chip pending"}>
+                          {t.is_categorized && t.category_name ? "已分类" : "未分类"}
+                        </span>
+                        <em>{confidenceText(t)}</em>
                       </td>
                       <td>
                         <div className="inline-actions">
-                          <button className="icon-btn" onClick={() => setEditing(t)} title="编辑"><Pencil size={15} /></button>
+                          <button className="icon-btn" onClick={() => setEditing(t)} title="编辑交易"><Pencil size={15} /></button>
                           <button className="icon-btn" onClick={() => reCategorize(t.id)} title="AI重新分类"><Sparkles size={15} /></button>
-                          <button className="icon-btn danger" onClick={() => handleDelete(t.id)} title="删除"><Trash2 size={15} /></button>
-                          <button className="icon-btn" title="更多"><MoreVertical size={15} /></button>
+                          <button className="icon-btn danger" onClick={() => handleDelete(t.id)} title="删除交易"><Trash2 size={15} /></button>
                         </div>
                       </td>
                     </tr>
@@ -457,7 +444,10 @@ export default function Transactions() {
           </div>
 
           <div className="table-footer">
-            <div className="rows-select">每页显示 <strong>{perPage}</strong></div>
+            <div className="rows-select">
+              每页显示 <strong>{perPage}</strong>
+              <span>第 <strong>{Math.min(page, Math.max(totalPages, 1))}</strong> / <strong>{Math.max(totalPages, 1)}</strong> 页</span>
+            </div>
             {selected.size > 0 && (
               <div className="selection-actions">
                 <button className="btn btn-sm btn-secondary" onClick={handleBulkCategorize}>批量重新分类</button>
@@ -474,67 +464,6 @@ export default function Transactions() {
           </div>
         </section>
 
-        <aside className="ai-side-stack">
-          <section className="glass-panel ai-hole-panel">
-            <div className="panel-title">
-              <div><strong>AI 洞察</strong><span>自动轮播</span></div>
-              <Bot size={18} />
-            </div>
-            <div className="insight-carousel-card">
-              <span>{activeInsight + 1}/3</span>
-              <h3>{insights[activeInsight].title}</h3>
-              <p>{insights[activeInsight].body}</p>
-            </div>
-            <div className="carousel-dots">
-              {insights.map((item, index) => (
-                <button key={item.title} className={activeInsight === index ? "active" : ""} onClick={() => setActiveInsight(index)} />
-              ))}
-            </div>
-          </section>
-
-          <section className="glass-panel donut-panel">
-            <div className="panel-title">
-              <div><strong>本月支出概览</strong><span>分类占比</span></div>
-            </div>
-            <div className="donut-layout">
-              {categoryPie.length ? (
-                <>
-                  <ResponsiveContainer width="44%" height={170}>
-                    <PieChart>
-                      <Pie data={categoryPie} dataKey="value" innerRadius={44} outerRadius={66} paddingAngle={3}>
-                        {categoryPie.map((item) => <Cell key={item.name} fill={item.color} />)}
-                      </Pie>
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="pie-legend compact">
-                    {categoryPie.map((item) => (
-                      <div key={item.name}><span style={{ background: item.color }} /><strong>{item.name}</strong><em>{formatLegendValue(item.value)}</em></div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <div className="empty-chart-state">暂无支出分类数据</div>
-              )}
-            </div>
-          </section>
-
-          <section className="glass-panel mini-trend-panel">
-            <div className="panel-title">
-              <div><strong>趋势分析</strong><span>收支走势</span></div>
-            </div>
-            {trend.length ? (
-              <ResponsiveContainer width="100%" height={150}>
-                <LineChart data={trend}>
-                  <Tooltip />
-                  <Line type="monotone" dataKey="spend" stroke="#1f7aff" strokeWidth={2.4} dot={false} />
-                  <Line type="monotone" dataKey="income" stroke="#22c55e" strokeWidth={2.4} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="empty-chart-state">暂无收支趋势数据</div>
-            )}
-          </section>
-        </aside>
       </div>
 
       {showAdd && <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); showToast("已添加"); }} />}
@@ -555,11 +484,25 @@ function StatCard({ label, value, meta, icon, tone }: { label: string; value: st
   );
 }
 
+function currentMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthRange(month: string) {
+  if (!month) return [undefined, undefined] as const;
+  const [year, monthIndex] = month.split("-").map(Number);
+  const start = `${month}-01`;
+  const lastDay = new Date(year, monthIndex, 0).getDate();
+  const end = `${month}-${String(lastDay).padStart(2, "0")}`;
+  return [start, end] as const;
+}
+
 function getAccountName(txn: Transaction) {
   return txn.account_name || "导入账单";
 }
 
-function formatDescriptionMeta(txn: Transaction) {
+function formatTransactionMeta(txn: Transaction) {
   return txn.merchant_platform || "";
 }
 
@@ -584,8 +527,15 @@ function reviewLabel(status: string | null, reason: string | null) {
   return reason ? `${label}：${reason}` : label;
 }
 
-function formatLegendValue(value: number) {
-  return value > 100 ? `¥ ${value.toFixed(0)}` : `${value.toFixed(1)}%`;
+function needsManualReview(txn: Transaction) {
+  if (!txn.is_categorized || !txn.category_name) return true;
+  if (typeof txn.classification_confidence === "number" && txn.classification_confidence < 70) return true;
+  return ["not_reviewed", "review_invalid", "review_missing"].includes(txn.classification_review_status || "");
+}
+
+function confidenceText(txn: Transaction) {
+  const confidence = typeof txn.classification_confidence === "number" ? `${txn.classification_confidence}%` : "未计算";
+  return needsManualReview(txn) ? `${confidence} · 待复核` : `${confidence} · 已复核`;
 }
 
 function AddModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
