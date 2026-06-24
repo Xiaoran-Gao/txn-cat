@@ -15,6 +15,7 @@ import {
 import {
   AlertTriangle,
   ArrowRight,
+  Bell,
   Brain,
   CalendarDays,
   CreditCard,
@@ -26,7 +27,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { api } from "../api/client";
-import type { ClassificationJob, ImportResult, MonthlySummaryResult, Transaction } from "../types";
+import type { ClassificationJob, CreditCardReminder, ImportResult, MonthlySummaryResult, Transaction } from "../types";
 import { getClassificationProgress } from "../utils/classificationProgress";
 
 type HeatmapMode = "amount" | "count";
@@ -276,6 +277,7 @@ export default function Dashboard() {
   const [channelMode, setChannelMode] = useState<HeatmapMode>("amount");
   const [llmSummary, setLlmSummary] = useState("");
   const [llmStatus, setLlmStatus] = useState<"idle" | "loading" | "ready" | "fallback">("idle");
+  const [creditCardReminders, setCreditCardReminders] = useState<CreditCardReminder[]>([]);
 
   const refreshTransactions = useCallback(async () => {
     setTxns(await fetchAllTransactions());
@@ -289,6 +291,20 @@ export default function Dashboard() {
       })
       .catch(() => {
         if (active) setTxns([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api.creditCardReminders()
+      .then((items) => {
+        if (active) setCreditCardReminders(items);
+      })
+      .catch(() => {
+        if (active) setCreditCardReminders([]);
       });
     return () => {
       active = false;
@@ -720,6 +736,11 @@ export default function Dashboard() {
   const topCategory = analytics.categories[0];
   const displayedLlmStatus = analytics.structuredJson.total_spending ? llmStatus : "fallback";
   const displayedLlmSummary = llmSummary || fallbackLlmSummary;
+  const urgentCreditCardReminders = useMemo(() => {
+    return creditCardReminders
+      .filter((item) => item.status === "overdue" || item.status === "due_soon")
+      .slice(0, 3);
+  }, [creditCardReminders]);
   const categoryRows = useMemo(() => {
     return [...analytics.categories].sort((a, b) => categoryMode === "amount" ? b.amount - a.amount : b.count - a.count);
   }, [analytics.categories, categoryMode]);
@@ -826,6 +847,7 @@ export default function Dashboard() {
       {job && progress && <ProgressBar job={job} progress={progress} />}
       {notice && <div className="upload-result">{notice}</div>}
       {error && <div className="upload-error">{error}</div>}
+      {urgentCreditCardReminders.length ? <CreditCardReminderStrip reminders={urgentCreditCardReminders} /> : null}
 
       <section className="dashboard-section dashboard-priority-grid">
         <div className="monthly-report-card">
@@ -1130,6 +1152,32 @@ function Metric({ label, value, detail, tone, muted }: { label: string; value: s
       <strong>{value}</strong>
       <em>{detail}</em>
     </div>
+  );
+}
+
+function CreditCardReminderStrip({ reminders }: { reminders: CreditCardReminder[] }) {
+  return (
+    <section className="credit-reminder-strip">
+      <div className="credit-reminder-strip-head">
+        <div>
+          <Bell size={18} />
+          <strong>信用卡还款提醒</strong>
+        </div>
+        <Link to="/credit-cards">
+          查看全部
+          <ArrowRight size={15} />
+        </Link>
+      </div>
+      <div className="credit-reminder-strip-list">
+        {reminders.map((item) => (
+          <div className={`credit-reminder-chip status-${item.status}`} key={`${item.card.id}-${item.statement_date}`}>
+            <span>{item.card.issuer ? `${item.card.issuer} · ${item.card.name}` : item.card.name}</span>
+            <strong>{formatCurrency(item.remaining_amount)}</strong>
+            <em>{item.status_label} · {item.due_date.slice(5).replace("-", "/")}</em>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

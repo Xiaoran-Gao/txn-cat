@@ -27,10 +27,11 @@ def health():
     return {"status": "ok"}
 
 
-from routers import transactions, categories, analysis, query, system
+from routers import transactions, categories, analysis, query, system, credit_cards
 
 app.include_router(transactions.router, prefix="/api/transactions", tags=["transactions"])
 app.include_router(categories.router, prefix="/api/categories", tags=["categories"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(query.router, prefix="/api/query", tags=["query"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(credit_cards.router, prefix="/api/credit-cards", tags=["credit-cards"])

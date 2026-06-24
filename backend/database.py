@@ -71,6 +71,30 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS credit_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            issuer TEXT,
+            account_name TEXT NOT NULL,
+            statement_day INTEGER NOT NULL CHECK(statement_day BETWEEN 1 AND 31),
+            due_day INTEGER NOT NULL CHECK(due_day BETWEEN 1 AND 31),
+            reminder_days INTEGER NOT NULL DEFAULT 3 CHECK(reminder_days >= 0),
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS credit_card_statement_marks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL REFERENCES credit_cards(id) ON DELETE CASCADE,
+            statement_date DATE NOT NULL,
+            marked_paid INTEGER NOT NULL DEFAULT 1,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(card_id, statement_date)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
         CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_id);
         CREATE INDEX IF NOT EXISTS idx_txn_subcategory ON transactions(subcategory_id);
@@ -81,6 +105,10 @@ def init_db():
             ON transactions(merchant_canonical, is_categorized, category_id, date);
         CREATE INDEX IF NOT EXISTS idx_correction_raw_description
             ON correction_examples(raw_description, created_at);
+        CREATE INDEX IF NOT EXISTS idx_credit_cards_account_name
+            ON credit_cards(account_name);
+        CREATE INDEX IF NOT EXISTS idx_credit_card_marks_card_statement
+            ON credit_card_statement_marks(card_id, statement_date);
         """)
 
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()]

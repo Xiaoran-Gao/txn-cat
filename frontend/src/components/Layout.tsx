@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ChevronsLeft,
+  CreditCard,
   FolderTree,
   LayoutDashboard,
   MessageSquareText,
@@ -23,6 +24,7 @@ const navItems = [
     title: "Workspace",
     items: [
       { to: "/dashboard", label: "消费看板", icon: LayoutDashboard },
+      { to: "/credit-cards", label: "信用卡管理", icon: CreditCard },
       { to: "/query", label: "智能问答", icon: MessageSquareText },
     ],
   },

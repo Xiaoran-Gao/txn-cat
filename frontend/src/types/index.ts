@@ -104,3 +104,43 @@ export interface NLQueryResult {
   sql: string;
   data: Record<string, string | number | boolean | null>[] | null;
 }
+
+export interface CreditCard {
+  id: number;
+  name: string;
+  issuer: string | null;
+  account_name: string;
+  statement_day: number;
+  due_day: number;
+  reminder_days: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreditCardInput {
+  name: string;
+  issuer?: string | null;
+  account_name: string;
+  statement_day: number;
+  due_day: number;
+  reminder_days?: number;
+  is_active?: boolean;
+}
+
+export type CreditCardReminderStatus = "paid" | "overdue" | "due_soon" | "upcoming" | "no_bill";
+
+export interface CreditCardReminder {
+  card: CreditCard;
+  previous_statement_date: string;
+  statement_date: string;
+  due_date: string;
+  estimated_statement_amount: number;
+  recognized_paid_amount: number;
+  remaining_amount: number;
+  days_until_due: number;
+  status: CreditCardReminderStatus;
+  status_label: string;
+  is_marked_paid: boolean;
+  estimate_source: "transactions";
+}

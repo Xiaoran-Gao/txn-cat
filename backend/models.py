@@ -152,3 +152,57 @@ class AnomalyItem(BaseModel):
     amount: Optional[float] = None
     expected: Optional[float] = None
     detail: str
+
+
+class CreditCardCreate(BaseModel):
+    name: str
+    issuer: Optional[str] = None
+    account_name: str
+    statement_day: int = Field(ge=1, le=31)
+    due_day: int = Field(ge=1, le=31)
+    reminder_days: int = Field(default=3, ge=0)
+    is_active: bool = True
+
+
+class CreditCardUpdate(BaseModel):
+    name: Optional[str] = None
+    issuer: Optional[str] = None
+    account_name: Optional[str] = None
+    statement_day: Optional[int] = Field(default=None, ge=1, le=31)
+    due_day: Optional[int] = Field(default=None, ge=1, le=31)
+    reminder_days: Optional[int] = Field(default=None, ge=0)
+    is_active: Optional[bool] = None
+
+
+class CreditCardOut(BaseModel):
+    id: int
+    name: str
+    issuer: Optional[str] = None
+    account_name: str
+    statement_day: int
+    due_day: int
+    reminder_days: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreditCardStatementMarkCreate(BaseModel):
+    statement_date: date
+    marked_paid: bool = True
+    note: Optional[str] = None
+
+
+class CreditCardReminderOut(BaseModel):
+    card: CreditCardOut
+    previous_statement_date: date
+    statement_date: date
+    due_date: date
+    estimated_statement_amount: float
+    recognized_paid_amount: float
+    remaining_amount: float
+    days_until_due: int
+    status: str
+    status_label: str
+    is_marked_paid: bool
+    estimate_source: str = "transactions"

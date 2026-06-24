@@ -1457,6 +1457,267 @@ a {
 .stat-card.orange { color: var(--orange); }
 .stat-card.violet { color: var(--violet); }
 
+.credit-card-page {
+  display: grid;
+  gap: 16px;
+}
+
+.credit-card-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.credit-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.credit-card-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(180px, 0.55fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 124px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.credit-card-row.status-overdue {
+  border-color: rgba(240, 68, 101, 0.34);
+  background: rgba(255, 241, 244, 0.74);
+}
+
+.credit-card-row.status-due_soon {
+  border-color: rgba(255, 138, 31, 0.34);
+  background: rgba(255, 248, 237, 0.74);
+}
+
+.credit-card-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.credit-card-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  color: var(--blue);
+  background: rgba(31, 122, 255, 0.10);
+}
+
+.credit-card-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.credit-card-title-line strong {
+  color: #071426;
+  font-size: 16px;
+}
+
+.credit-card-main p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.credit-card-date-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  color: #7b8799;
+  font-size: 12px;
+}
+
+.credit-card-date-line span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #506078;
+  background: rgba(119, 135, 160, 0.12);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.status-pill.status-overdue,
+.credit-reminder-chip.status-overdue {
+  color: #be123c;
+  background: rgba(255, 228, 233, 0.86);
+}
+
+.status-pill.status-due_soon,
+.credit-reminder-chip.status-due_soon {
+  color: #c2410c;
+  background: rgba(255, 237, 213, 0.88);
+}
+
+.status-pill.status-paid {
+  color: #15803d;
+  background: rgba(220, 252, 231, 0.88);
+}
+
+.credit-card-money {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  min-width: 0;
+}
+
+.credit-card-money span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.credit-card-money strong {
+  color: #071426;
+  font-size: 22px;
+}
+
+.credit-card-money em {
+  color: #7b8799;
+  font-size: 12px;
+  font-style: normal;
+  text-align: right;
+}
+
+.credit-card-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.credit-card-actions .btn {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.credit-card-actions .icon-btn {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  padding: 0;
+}
+
+.form-grid.three-col {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.checkbox-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  color: #31415a;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.checkbox-line input {
+  width: 16px;
+  height: 16px;
+}
+
+.credit-card-modal {
+  width: 560px;
+}
+
+.credit-reminder-strip {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid rgba(255, 138, 31, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 250, 242, 0.88);
+  box-shadow: var(--shadow-soft);
+}
+
+.credit-reminder-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.credit-reminder-strip-head div,
+.credit-reminder-strip-head a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.credit-reminder-strip-head strong {
+  color: #071426;
+}
+
+.credit-reminder-strip-head a {
+  color: var(--blue);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 820;
+}
+
+.credit-reminder-strip-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.credit-reminder-chip {
+  display: grid;
+  gap: 4px;
+  min-height: 76px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.credit-reminder-chip span,
+.credit-reminder-chip em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credit-reminder-chip span {
+  color: #46566f;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.credit-reminder-chip strong {
+  color: #071426;
+  font-size: 18px;
+}
+
+.credit-reminder-chip em {
+  color: #69758a;
+  font-size: 12px;
+  font-style: normal;
+}
+
 .transaction-layout-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -4936,6 +5197,33 @@ code {
   .table-footer,
   .page-header {
     flex-direction: column;
+  }
+
+  .credit-card-row,
+  .credit-reminder-strip-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .credit-card-row {
+    align-items: stretch;
+  }
+
+  .credit-card-money {
+    justify-items: start;
+  }
+
+  .credit-card-money em {
+    text-align: left;
+  }
+
+  .credit-card-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .form-grid.two-col,
+  .form-grid.three-col {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .command-actions,

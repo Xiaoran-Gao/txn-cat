@@ -2,6 +2,9 @@ import type {
   AnomalyItem,
   Category,
   ClassificationJob,
+  CreditCard,
+  CreditCardInput,
+  CreditCardReminder,
   ImportResult,
   MonthlySummaryResult,
   NLQueryResult,
@@ -93,6 +96,20 @@ export const api = {
     request<{ status: string }>(`/categories/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteCategory: (id: number, reassignTo?: number) =>
     request<{ status: string }>(`/categories/${id}?${reassignTo ? `reassign_to=${reassignTo}` : ""}`, { method: "DELETE" }),
+
+  // Credit cards
+  listCreditCards: () => request<CreditCard[]>("/credit-cards"),
+  createCreditCard: (data: CreditCardInput) =>
+    request<CreditCard>("/credit-cards", { method: "POST", body: JSON.stringify(data) }),
+  updateCreditCard: (id: number, data: Partial<CreditCardInput>) =>
+    request<CreditCard>(`/credit-cards/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteCreditCard: (id: number) => request<{ status: string }>(`/credit-cards/${id}`, { method: "DELETE" }),
+  creditCardReminders: (asOf?: string) =>
+    request<CreditCardReminder[]>(`/credit-cards/reminders${asOf ? `?as_of=${asOf}` : ""}`),
+  creditCardAccountOptions: () =>
+    request<{ accounts: string[]; used_accounts: string[]; available_accounts: string[] }>("/credit-cards/account-options"),
+  markCreditCardStatement: (id: number, data: { statement_date: string; marked_paid?: boolean; note?: string | null }) =>
+    request<{ status: string }>(`/credit-cards/${id}/statement-marks`, { method: "POST", body: JSON.stringify(data) }),
 
   // Analysis
   summary: (month: string) => request<SummaryData>(`/analysis/summary?month=${month}`),
