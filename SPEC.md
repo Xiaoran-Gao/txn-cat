@@ -10,8 +10,9 @@ The implemented product lets the user:
 - parse and normalize transaction rows into SQLite
 - deduplicate imported rows
 - classify transactions with a local Ollama model
-- review, edit, delete, and manually add transactions
+- review, search, filter, edit, delete, bulk delete, and manually add transactions
 - maintain a two-level category tree
+- view a monthly spending dashboard with deterministic analytics and optional LLM narrative
 - ask natural-language Chinese questions that are converted into read-only SQLite queries
 - inspect local database and Ollama health from Settings
 
@@ -40,6 +41,8 @@ OLLAMA_MODEL=qwen3:8b
 OLLAMA_TIMEOUT=180
 OLLAMA_BATCH_SIZE=4
 OLLAMA_RETRY_BATCH_SIZE=2
+OLLAMA_BATCH_WORKERS=1
+OLLAMA_MAX_PARALLEL=1
 OLLAMA_REVIEW_LOW_CONFIDENCE=80
 OLLAMA_REVIEW_SAMPLE_RATE=0
 OLLAMA_MAX_RETRIES=5
@@ -50,8 +53,8 @@ MAX_CORRECTION_EXAMPLES=20
 
 1. The user starts the app with `./scripts/dev.sh`.
 2. The backend initializes SQLite tables and seeds default Chinese categories if none exist.
-3. The user uploads `.xlsx`, `.xls`, or `.csv` from Home or Transactions.
-4. The parser detects transaction columns, payment channel, account, and merchant platform when possible.
+3. The user uploads `.xlsx`, `.xls`, or `.csv` from Home, Dashboard, or Transactions.
+4. The parser detects transaction columns, product info, payment channel, account, and merchant platform when possible.
 5. The importer normalizes descriptions, inserts new rows, skips duplicates, and creates a background classification job for new or still-uncategorized duplicate rows.
 6. The frontend polls the classification job endpoint and displays progress.
 7. The user reviews transactions, filters/searches/sorts them, edits metadata and categories, deletes rows, or triggers AI classification again.
@@ -93,11 +96,14 @@ CREATE TABLE transactions (
     raw_description TEXT NOT NULL,
     display_description TEXT NOT NULL,
     display_description_source TEXT DEFAULT 'rule',
+    raw_product_info TEXT,
+    display_product_info TEXT,
     amount REAL NOT NULL,
     currency TEXT DEFAULT 'CNY',
     account_name TEXT,
     payment_channel TEXT,
     merchant_platform TEXT,
+    merchant_canonical TEXT,
     category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     subcategory_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     classification_confidence INTEGER,
@@ -125,6 +131,12 @@ CREATE INDEX idx_txn_date ON transactions(date);
 CREATE INDEX idx_txn_category ON transactions(category_id);
 CREATE INDEX idx_txn_subcategory ON transactions(subcategory_id);
 CREATE INDEX idx_txn_categorized ON transactions(is_categorized);
+CREATE INDEX idx_txn_history_exact
+    ON transactions(raw_description, raw_product_info, is_categorized, category_id);
+CREATE INDEX idx_txn_merchant_history
+    ON transactions(merchant_canonical, is_categorized, category_id, date);
+CREATE INDEX idx_correction_raw_description
+    ON correction_examples(raw_description, created_at);
 ```
 
 ### 4.3 Default Categories
@@ -191,11 +203,17 @@ Detection uses header matching and sample heuristics. It also calls local Ollama
 
 ### 5.4 Metadata Detection
 
-Implemented metadata fields:
+Parser-detected metadata fields:
 
 - `account_name`
 - `payment_channel`
 - `merchant_platform`
+- `raw_product_info`
+
+Importer-derived metadata fields:
+
+- `display_product_info`
+- `merchant_canonical`
 
 Payment channel detection currently recognizes common Chinese wallets and banks, including Alipay, WeChat Pay, CMB, BOC, ICBC, CCB, ABC, and Bankcomm by keyword.
 
@@ -218,7 +236,7 @@ For split expense/income columns:
 Import deduplication checks:
 
 ```text
-date + raw_description + amount
+date + raw_description + amount + raw_product_info
 ```
 
 Existing duplicates are skipped. If a duplicate existing row is still uncategorized, its id is included in the classification job.
@@ -232,6 +250,9 @@ On import and manual creation, the app stores:
 - `raw_description`: original statement text
 - `display_description`: deterministic cleaned display text
 - `display_description_source`: initially `rule`
+- `raw_product_info`: imported product/item detail when detected
+- `display_product_info`: deterministic cleaned product/item detail
+- `merchant_canonical`: canonical merchant key derived from description, display text, and product/platform hints
 
 When the LLM later returns a better display description, the source becomes `llm`, unless the user manually edited the display description. Manual display descriptions are preserved during grouped classification updates.
 
@@ -269,10 +290,16 @@ Jobs are in-memory only and do not survive backend restart.
 
 ### 7.3 Grouping Before LLM Calls
 
-Batch classification groups transactions by:
+Before calling the LLM, batch classification first tries to reuse existing classifications from:
+
+- exact user correction examples by `raw_description`
+- exact prior categorized transactions by `raw_description`, `raw_product_info`, and amount direction
+- same canonical merchant plus similar product details and amount direction
+
+Rows that still need the LLM are grouped by:
 
 ```text
-display_description + amount direction
+merchant_canonical + display/raw description fallback + amount direction + similar product key
 ```
 
 Amount direction is:
@@ -292,6 +319,8 @@ The LLM prompt includes:
 - transaction id
 - display description
 - raw description
+- product info
+- canonical merchant
 - amount
 - optional refund context
 
@@ -363,6 +392,7 @@ Manual transaction creation supports:
 
 - date
 - description
+- product info
 - amount
 - currency
 - account name
@@ -374,6 +404,8 @@ Transaction update supports:
 - date
 - raw description
 - display description
+- raw product info
+- display product info
 - amount
 - account name
 - payment channel
@@ -571,7 +603,7 @@ Implemented in `frontend/src/pages/Dashboard.tsx`.
 Dashboard currently provides:
 
 - upload Excel/CSV from the dashboard header
-- trigger "补全分类" for uncategorized spending rows
+- trigger AI classification for uncategorized transactions
 - classification job progress polling
 - fetch all transaction pages through the list API
 - automatically select the latest month that has positive spending data
@@ -585,10 +617,8 @@ Dashboard currently provides:
   - month-over-month change when previous month spending exists
   - anomaly count
 - daily spending heatmap for the active month
-- heatmap toggle between spending amount and transaction count
-- daily trend line chart
-- 7-day moving average
-- previous-month same-day comparison when previous-month data exists
+- shared toggle between spending amount and transaction count for monthly trend and daily heatmap
+- monthly bar chart for spending amount or transaction count
 - category donut chart with Top categories and merged "其他"
 - category ranking with amount, share, count, and month-over-month change
 - Top 3 merchant ranking by amount
@@ -627,22 +657,21 @@ Transactions page currently provides:
 - single-row AI recategorization
 - row deletion
 - bulk deletion
-- bulk "mark for recategorization" action
+- bulk "mark for recategorization" action in the UI
 - search
+- month filter wired to backend `start_date` and `end_date`
 - category/subcategory filter
 - categorization status filter
 - account filter based on currently loaded rows
 - date/amount sorting
 - pagination at 50 rows per page
-- comfort/compact density toggle
 - current-page stat cards
-- category spend pie chart for loaded rows
-- recent loaded-row spend/income line chart
-- simple rotating insight card based on loaded rows
+- import result banner
+- per-job classification progress bar
+- classification confidence and review status display
 
 Limitations in current implementation:
 
-- The visible "本月" date filter button is not wired to backend date filtering.
 - Account filtering is applied client-side to the currently loaded page, not backend-wide.
 - Bulk recategorization currently calls bulk update with `category_id: null`; backend only updates rows when `category_id` is not null, so this does not actually clear categorization or trigger AI classification by itself.
 
@@ -705,7 +734,7 @@ Settings currently displays:
 These are not implemented or not fully wired in the current code:
 
 - Settings does not yet expose correction example management or data export/clear controls.
-- Transaction list API supports date range filters, but the current Transactions UI does not wire a real date range picker.
+- Transactions UI exposes a month picker rather than an arbitrary date range picker.
 - Transaction list API does not support backend account/payment-channel/merchant-platform filters yet.
 - Natural-language SQL safety uses keyword rejection, not a SQL parser or read-only SQLite connection enforcement.
 - Classification jobs are stored in process memory and disappear on backend restart.
