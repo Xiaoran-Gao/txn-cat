@@ -68,6 +68,11 @@ export const api = {
     Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
     return request<{ items: Transaction[]; total: number; page: number; per_page: number }>(`/transactions?${qs}`);
   },
+  transactionFilterOptions: (params: QueryParams) => {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
+    return request<{ accounts: string[]; payment_channels: string[]; merchant_platforms: string[] }>(`/transactions/filter-options?${qs}`);
+  },
   getTransaction: (id: number) => request<Transaction>(`/transactions/${id}`),
   updateTransaction: (id: number, data: TransactionUpdateInput) =>
     request<{ status: string }>(`/transactions/${id}`, { method: "PUT", body: JSON.stringify(data) }),

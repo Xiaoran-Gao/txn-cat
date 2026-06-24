@@ -42,6 +42,11 @@ export default function Transactions() {
   const [classificationJob, setClassificationJob] = useState<ClassificationJob | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [filterOptions, setFilterOptions] = useState({
+    accounts: [] as string[],
+    payment_channels: [] as string[],
+    merchant_platforms: [] as string[],
+  });
 
   const perPage = 50;
 
@@ -57,14 +62,12 @@ export default function Transactions() {
       category_id: filterType === "cat" ? filterId : undefined,
       subcategory_id: filterType === "sub" ? filterId : undefined,
       is_categorized: statusFilter === "confirmed" ? true : statusFilter === "pending" ? false : undefined,
+      account_name: accountFilter === "all" ? undefined : accountFilter,
       sort_by: sortBy,
       sort_order: sortOrder,
     })
       .then((d) => {
-        const accountFiltered = accountFilter === "all"
-          ? d.items
-          : d.items.filter((txn) => getAccountName(txn) === accountFilter);
-        setTxns(accountFiltered);
+        setTxns(d.items);
         setTotal(d.total);
       })
       .catch(() => setToast({ msg: "加载交易记录失败", type: "error" }));
@@ -74,6 +77,24 @@ export default function Transactions() {
   useEffect(() => {
     api.listCategories().then(setCategories).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const [filterType, filterId] = catFilter.split(":");
+    const [startDate, endDate] = monthRange(activeMonth);
+    api.transactionFilterOptions({
+      start_date: startDate,
+      end_date: endDate,
+      search,
+      category_id: filterType === "cat" ? filterId : undefined,
+      subcategory_id: filterType === "sub" ? filterId : undefined,
+      is_categorized: statusFilter === "confirmed" ? true : statusFilter === "pending" ? false : undefined,
+    })
+      .then((options) => {
+        setFilterOptions(options);
+        setAccountFilter((current) => current === "all" || options.accounts.includes(current) ? current : "all");
+      })
+      .catch(() => setFilterOptions({ accounts: [], payment_channels: [], merchant_platforms: [] }));
+  }, [activeMonth, search, catFilter, statusFilter]);
 
   const showToast = (msg: string, type = "success") => {
     setToast({ msg, type });
@@ -233,10 +254,6 @@ export default function Transactions() {
     return { count: txns.length, categorized, uncategorized, reviewNeeded, rate, avgConfidence };
   }, [txns]);
 
-  const accountOptions = useMemo(() => {
-    return Array.from(new Set(txns.map(getAccountName).filter((account) => account !== "导入账单"))).sort();
-  }, [txns]);
-
   const totalPages = Math.ceil(total / perPage);
   const classificationProgress = classificationJob ? getClassificationProgress(classificationJob) : null;
 
@@ -322,7 +339,7 @@ export default function Transactions() {
             </label>
             <select value={accountFilter} onChange={(e) => { setAccountFilter(e.target.value); setPage(1); }}>
               <option value="all">全部账户</option>
-              {accountOptions.map((account) => <option key={account} value={account}>{account}</option>)}
+              {filterOptions.accounts.map((account) => <option key={account} value={account}>{account}</option>)}
             </select>
             <select value={catFilter} onChange={(e) => { setCatFilter(e.target.value); setPage(1); }}>
               <option value="">全部分类</option>

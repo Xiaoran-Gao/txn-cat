@@ -10,6 +10,71 @@ from services.normalizer import canonical_merchant, normalize_description, norma
 router = APIRouter()
 
 
+def _transaction_filters(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category_id: int | None = None,
+    subcategory_id: int | None = None,
+    search: str | None = None,
+    is_categorized: bool | None = None,
+    account_name: str | None = None,
+    payment_channel: str | None = None,
+    merchant_platform: str | None = None,
+) -> tuple[str, list]:
+    conditions = []
+    params = []
+
+    if start_date:
+        conditions.append("t.date >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("t.date <= ?")
+        params.append(end_date)
+    if category_id:
+        conditions.append("t.category_id = ?")
+        params.append(category_id)
+    if subcategory_id:
+        conditions.append("t.subcategory_id = ?")
+        params.append(subcategory_id)
+    if search:
+        conditions.append("(t.raw_description LIKE ? OR t.display_description LIKE ? OR t.raw_product_info LIKE ? OR t.display_product_info LIKE ? OR t.merchant_canonical LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"])
+    if is_categorized is not None:
+        conditions.append("t.is_categorized = ?")
+        params.append(1 if is_categorized else 0)
+    if account_name:
+        conditions.append("t.account_name = ?")
+        params.append(account_name)
+    if payment_channel:
+        conditions.append("t.payment_channel = ?")
+        params.append(payment_channel)
+    if merchant_platform:
+        conditions.append("t.merchant_platform = ?")
+        params.append(merchant_platform)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    return where, params
+
+
+def _distinct_values(conn, column: str, where: str, params: list) -> list[str]:
+    rows = conn.execute(
+        f"""SELECT DISTINCT t.{column} as value
+            FROM transactions t
+            {where}
+            AND t.{column} IS NOT NULL
+            AND t.{column} != ''
+            ORDER BY t.{column}""",
+        params,
+    ).fetchall() if where else conn.execute(
+        f"""SELECT DISTINCT t.{column} as value
+            FROM transactions t
+            WHERE t.{column} IS NOT NULL
+              AND t.{column} != ''
+            ORDER BY t.{column}"""
+    ).fetchall()
+    return [row["value"] for row in rows]
+
+
 @router.post("/import", response_model=ImportResult)
 def import_transactions(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     if not (file.filename.lower().endswith((".xlsx", ".xls", ".csv"))):
@@ -132,6 +197,9 @@ def list_transactions(
     subcategory_id: int | None = None,
     search: str | None = None,
     is_categorized: bool | None = None,
+    account_name: str | None = None,
+    payment_channel: str | None = None,
+    merchant_platform: str | None = None,
     sort_by: str = "date",
     sort_order: str = "desc",
 ):
@@ -141,29 +209,17 @@ def list_transactions(
     if sort_order not in ("asc", "desc"):
         sort_order = "desc"
 
-    conditions = []
-    params = []
-
-    if start_date:
-        conditions.append("t.date >= ?")
-        params.append(start_date)
-    if end_date:
-        conditions.append("t.date <= ?")
-        params.append(end_date)
-    if category_id:
-        conditions.append("t.category_id = ?")
-        params.append(category_id)
-    if subcategory_id:
-        conditions.append("t.subcategory_id = ?")
-        params.append(subcategory_id)
-    if search:
-        conditions.append("(t.raw_description LIKE ? OR t.display_description LIKE ? OR t.raw_product_info LIKE ? OR t.display_product_info LIKE ? OR t.merchant_canonical LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"])
-    if is_categorized is not None:
-        conditions.append("t.is_categorized = ?")
-        params.append(1 if is_categorized else 0)
-
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where, params = _transaction_filters(
+        start_date=start_date,
+        end_date=end_date,
+        category_id=category_id,
+        subcategory_id=subcategory_id,
+        search=search,
+        is_categorized=is_categorized,
+        account_name=account_name,
+        payment_channel=payment_channel,
+        merchant_platform=merchant_platform,
+    )
 
     with db_connection() as conn:
         count = conn.execute(
@@ -188,6 +244,32 @@ def list_transactions(
         "page": page,
         "per_page": per_page,
     }
+
+
+@router.get("/filter-options")
+def transaction_filter_options(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category_id: int | None = None,
+    subcategory_id: int | None = None,
+    search: str | None = None,
+    is_categorized: bool | None = None,
+):
+    where, params = _transaction_filters(
+        start_date=start_date,
+        end_date=end_date,
+        category_id=category_id,
+        subcategory_id=subcategory_id,
+        search=search,
+        is_categorized=is_categorized,
+    )
+
+    with db_connection() as conn:
+        return {
+            "accounts": _distinct_values(conn, "account_name", where, params),
+            "payment_channels": _distinct_values(conn, "payment_channel", where, params),
+            "merchant_platforms": _distinct_values(conn, "merchant_platform", where, params),
+        }
 
 
 @router.get("/{txn_id}")
