@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ChevronsLeft,
   CreditCard,
@@ -10,7 +10,6 @@ import {
   Settings,
   UploadCloud,
 } from "lucide-react";
-import { api } from "../api/client";
 
 const navItems = [
   {
@@ -40,46 +39,6 @@ const navItems = [
 
 export default function Layout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [systemInfo, setSystemInfo] = useState({
-    statusText: "检测中",
-    statusOk: false,
-    databaseOk: false,
-    storageText: "读取中",
-    versionText: "版本读取中",
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    api.health()
-      .then((health) => {
-        if (cancelled) return;
-        const statusText = health.database && health.ollama
-          ? "AI 待命中"
-          : health.database
-            ? "本地运行中"
-            : "数据库异常";
-        setSystemInfo({
-          statusText,
-          statusOk: health.database && health.ollama,
-          databaseOk: health.database,
-          storageText: `数据库 ${formatBytes(health.storage.bytes)}`,
-          versionText: `v${health.version}`,
-        });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSystemInfo({
-          statusText: "后端不可用",
-          statusOk: false,
-          databaseOk: false,
-          storageText: "存储不可用",
-          versionText: "版本未知",
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   return (
     <div className={`app-layout ${collapsed ? "sidebar-collapsed" : ""}`}>
@@ -110,16 +69,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className="storage-card">
-            <div>
-              <ReceiptText size={17} />
-              <strong>本地存储</strong>
-              <span className={`live-dot ${systemInfo.databaseOk ? "" : "danger"}`} />
-            </div>
-            <p>{systemInfo.storageText}</p>
-          </div>
           <div className="sidebar-bottom">
-            <span>{systemInfo.versionText}</span>
             <button className="sidebar-collapse" onClick={() => setCollapsed((v) => !v)} title="折叠侧栏">
               <ChevronsLeft size={16} />
             </button>
@@ -131,17 +81,4 @@ export default function Layout({ children }: { children: ReactNode }) {
       </main>
     </div>
   );
-}
-
-function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "不可用";
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
